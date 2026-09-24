@@ -236,3 +236,33 @@ test('GitHub Models: refusals and content filters give specific messages', async
   t.mock.method(globalThis, 'fetch', async () => new Response('bad credentials', { status: 401 }));
   await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: auth-401\]/);
 });
+
+test('GitHub Models: sends GitHub headers; odd replies fall back to the older endpoint', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  const calls = [];
+  const replies = [
+    new Response('<html>not an API</html>', { status: 200, headers: { 'content-type': 'text/html' } }),
+    Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(GOOD) } }] }),
+  ];
+  t.mock.method(globalThis, 'fetch', async (url, init) => { calls.push({ url, init, body: JSON.parse(init.body) }); return replies.shift(); });
+  const r = await grade(INPUT, { GITHUB_MODELS_TOKEN: 't' });
+  assert.strictEqual(r.totalAwarded, 6);
+  assert.strictEqual(calls[0].init.headers['X-GitHub-Api-Version'], '2022-11-28');
+  assert.strictEqual(calls[0].init.redirect, 'manual');
+  assert.strictEqual(calls[1].url, 'https://models.inference.ai.azure.com/chat/completions');
+  assert.strictEqual(calls[1].body.model, 'gpt-4.1');
+
+  // A redirect on the main endpoint also switches to the fallback.
+  const urls = [];
+  const replies2 = [
+    new Response('', { status: 302, headers: { location: 'https://github.com/marketplace/models' } }),
+    Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(GOOD) } }] }),
+  ];
+  t.mock.method(globalThis, 'fetch', async (url) => { urls.push(url); return replies2.shift(); });
+  assert.strictEqual((await grade(INPUT, { GITHUB_MODELS_TOKEN: 't' })).totalAwarded, 6);
+  assert.match(urls[1], /models\.inference\.ai\.azure\.com/);
+
+  // Both endpoints give nothing usable: a specific code.
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ choices: [] }));
+  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: no-choices-200\]/);
+});

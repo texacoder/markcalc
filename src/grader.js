@@ -255,16 +255,20 @@ async function postJson(url, headers, body, env) {
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...headers },
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...headers },
       body: JSON.stringify(body),
+      // A redirect would silently turn this POST into a GET of some other page; treat it as an error.
+      redirect: 'manual',
       signal: AbortSignal.timeout(Number(env.AI_TIMEOUT_MS || env.OPENAI_TIMEOUT_MS) || 240000),
     });
-    const text = await res.text();
+    let text = await res.text();
+    if (res.status >= 300 && res.status < 400) text = `redirect to ${res.headers.get('location')} ${text}`;
     let json = null;
     try {
       json = JSON.parse(text);
     } catch {}
-    return { status: res.status, ok: res.ok, json, text };
+    const ok = res.status >= 200 && res.status < 300;
+    return { status: res.status, ok, json, text, contentType: res.headers.get('content-type') || '' };
   } catch (err) {
     return { status: 0, ok: false, json: null, text: String(err) };
   }
@@ -307,13 +311,19 @@ const TOO_BIG = 'Too much to read in one go. Use fewer pages, or type the questi
 // OpenAI and GitHub Models share the same chat-completions format.
 function openAICompatibleConfig(env, provider) {
   if (provider === 'github') {
+    const model = env.GITHUB_MODEL || 'openai/gpt-4.1';
     return {
       label: 'GitHub Models',
       url: `${env.GITHUB_MODELS_BASE_URL || 'https://models.github.ai/inference'}/chat/completions`,
+      headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
       key: env.GITHUB_MODELS_TOKEN,
-      model: env.GITHUB_MODEL || 'openai/gpt-4.1',
+      model,
       maxTokensField: 'max_tokens',
       maxTokens: 4000,
+      // GitHub's older endpoint for the same models, tried if the main one gives no usable reply.
+      fallback: env.GITHUB_MODELS_BASE_URL
+        ? null
+        : { url: 'https://models.inference.ai.azure.com/chat/completions', model: model.replace(/^[^/]+\//, ''), headers: {} },
     };
   }
   const model = env.OPENAI_MODEL || 'gpt-4.1';
@@ -354,12 +364,31 @@ async function gradeWithOpenAICompatible(input, env, provider) {
   };
 
   for (let attempt = 1; ; attempt++) {
-    const res = await postJson(cfg.url, { Authorization: `Bearer ${cfg.key}` }, body, env);
+    const res = await postJson(cfg.url, { Authorization: `Bearer ${cfg.key}`, ...cfg.headers }, body, env);
     if (res.ok) {
       const choice = res.json?.choices?.[0];
       const message = choice?.message;
       const text = messageText(message);
       if (text && !message?.refusal) return parseResultText(text);
+
+      // Not a chat completion at all (wrong endpoint, HTML page, empty choices): log the raw reply.
+      if (!choice) {
+        console.error(
+          `${cfg.label}: unexpected reply (attempt ${attempt}) from ${cfg.url}`,
+          res.status,
+          res.contentType,
+          res.text.slice(0, 1500),
+        );
+        const filtered = JSON.stringify(res.json?.prompt_filter_results || '').includes('"filtered":true');
+        if (filtered) throw new GradingError(FILTERED, 422);
+        if (cfg.fallback) {
+          console.error(`${cfg.label}: trying the fallback endpoint ${cfg.fallback.url}`);
+          Object.assign(cfg, cfg.fallback, { fallback: null });
+          body.model = cfg.model;
+          continue;
+        }
+        throw new GradingError(`${UNREADABLE} [code: ${res.json ? 'no-choices' : 'not-json'}-${res.status}]`, 422);
+      }
 
       // A reply without usable content: record why, then retry once in JSON mode.
       const reason = choice?.finish_reason || 'none';
@@ -406,6 +435,12 @@ async function gradeWithOpenAICompatible(input, env, provider) {
       continue;
     }
     if (res.status === 429) throw new GradingError(BUSY, 503);
+    if (cfg.fallback && ((res.status >= 300 && res.status < 400) || [401, 403, 404, 405].includes(res.status))) {
+      console.error(`${cfg.label}: trying the fallback endpoint ${cfg.fallback.url}`);
+      Object.assign(cfg, cfg.fallback, { fallback: null });
+      body.model = cfg.model;
+      continue;
+    }
     if (res.status === 401 || res.status === 403) {
       console.error(`${cfg.label}: the key/token is invalid or lacks permission.`);
       throw new GradingError(`${FAILED} [code: auth-${res.status}]`);

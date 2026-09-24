@@ -300,3 +300,44 @@ test('selfTest checks the catalogue and each header set, then schema and image w
   assert.strictEqual(r.schemaTest.status, 200);
   assert.strictEqual(r.imageTest.status, 200);
 });
+
+test('Groq / OpenRouter: chosen over the GitHub token, right limits and request format', async (t) => {
+  assert.strictEqual(providerName({ GITHUB_MODELS_TOKEN: 'g', GROQ_API_KEY: 'q' }), 'groq');
+  assert.strictEqual(providerName({ GITHUB_MODELS_TOKEN: 'g', OPENROUTER_API_KEY: 'o' }), 'openrouter');
+  assert.strictEqual(providerName({ AI_BASE_URL: 'https://x/v1', AI_API_KEY: 'k' }), 'custom');
+  assert.strictEqual(maxPages({ GROQ_API_KEY: 'q' }), 5);
+
+  t.mock.method(console, 'error', () => {});
+  const calls = [];
+  const replies = [
+    new Response('{"error":{"message":"response_format json_schema is not supported with this model"}}', { status: 400 }),
+    new Response('{"error":{"message":"json mode is not supported with images"}}', { status: 400 }),
+    Response.json({ choices: [{ finish_reason: 'stop', message: { content: 'Here you go:\n' + JSON.stringify(GOOD) } }] }),
+  ];
+  t.mock.method(globalThis, 'fetch', async (url, init) => { calls.push({ url, body: JSON.parse(init.body), headers: init.headers }); return replies.shift(); });
+  const r = await grade(INPUT, { GROQ_API_KEY: 'q', GITHUB_MODELS_TOKEN: 'g' });
+  assert.strictEqual(r.totalAwarded, 6);
+  assert.strictEqual(calls[0].url, 'https://api.groq.com/openai/v1/chat/completions');
+  assert.strictEqual(calls[0].headers.Authorization, 'Bearer q');
+  assert.strictEqual(calls[0].body.model, 'meta-llama/llama-4-scout-17b-16e-instruct');
+  assert.strictEqual(calls[0].body.max_completion_tokens, 4000);
+  assert.strictEqual(calls[0].body.response_format.type, 'json_schema');
+  assert.strictEqual(calls[1].body.response_format.type, 'json_object');
+  assert.strictEqual(calls[2].body.response_format, undefined);
+  assert.match(calls[2].body.messages[0].content, /JSON Schema/);
+});
+
+test('selfTest for Groq lists the models that can read images', async (t) => {
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    if (String(url).endsWith('/models')) {
+      return Response.json({ data: [{ id: 'meta-llama/llama-4-scout-17b-16e-instruct' }, { id: 'llama-3.1-8b-instant' }] });
+    }
+    return Response.json({ choices: [{ message: { content: 'OK' } }] });
+  });
+  const r = await selfTest({ GROQ_API_KEY: 'q' });
+  assert.strictEqual(r.provider, 'groq');
+  assert.strictEqual(r.models.modelListed, true);
+  assert.deepStrictEqual(r.models.canReadImages, ['meta-llama/llama-4-scout-17b-16e-instruct']);
+  assert.strictEqual(r.plainTest.replyText, 'OK');
+  assert.strictEqual(r.imageTest.status, 200);
+});

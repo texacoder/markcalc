@@ -13,9 +13,12 @@ services:
         value: production
       - key: NODE_VERSION
         value: "22"
-      # AI for marking. Fill in ONE of these two (leave the other empty):
-      # Free GitHub token with the "Models" permission: https://github.com/settings/personal-access-tokens/new
-      - key: GITHUB_MODELS_TOKEN
+      # AI for marking. Fill in ONE (leave the others empty):
+      # Free Groq key (sign in with GitHub or Google): https://console.groq.com/keys
+      - key: GROQ_API_KEY
+        sync: false
+      # Free OpenRouter key: https://openrouter.ai/keys
+      - key: OPENROUTER_API_KEY
         sync: false
       # Free Google Gemini key (needs a Google Cloud project): https://aistudio.google.com/app/apikey
       - key: GEMINI_API_KEY

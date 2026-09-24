@@ -215,8 +215,11 @@ const UNREADABLE = 'This answer sheet could not be marked. Check that the photos
 function providerName(env) {
   if (env.MOCK_GRADER === '1') return 'mock';
   const chosen = String(env.AI_PROVIDER || '').toLowerCase();
-  if (['gemini', 'github', 'openai'].includes(chosen)) return chosen;
+  if (['gemini', 'groq', 'openrouter', 'custom', 'github', 'openai'].includes(chosen)) return chosen;
   if (env.GEMINI_API_KEY) return 'gemini';
+  if (env.GROQ_API_KEY) return 'groq';
+  if (env.OPENROUTER_API_KEY) return 'openrouter';
+  if (env.AI_BASE_URL && env.AI_API_KEY) return 'custom';
   if (env.GITHUB_MODELS_TOKEN) return 'github';
   if (env.OPENAI_API_KEY) return 'openai';
   return 'none';
@@ -248,7 +251,8 @@ function requestTooLarge(input, env) {
 function maxPages(env) {
   const configured = Number(env.MAX_PAGES);
   if (configured > 0) return configured;
-  return providerName(env) === 'github' ? 7 : 40;
+  // Groq's vision models take at most 5 images per request; free OpenRouter models are kept small too.
+  return { github: 7, groq: 5, openrouter: 10, custom: 20 }[providerName(env)] || 40;
 }
 
 // Drop headers set to null/undefined (lets a caller remove a default).
@@ -381,15 +385,64 @@ function openAICompatibleConfig(env, provider) {
       headers: GITHUB_VARIANTS[githubVariant].headers,
     };
   }
+  if (provider === 'groq') {
+    return {
+      label: 'Groq',
+      url: 'https://api.groq.com/openai/v1/chat/completions',
+      modelsUrl: 'https://api.groq.com/openai/v1/models',
+      key: env.GROQ_API_KEY,
+      model: env.GROQ_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct',
+      maxTokensField: 'max_completion_tokens',
+      maxTokens: 4000,
+    };
+  }
+  if (provider === 'openrouter') {
+    return {
+      label: 'OpenRouter',
+      url: 'https://openrouter.ai/api/v1/chat/completions',
+      modelsUrl: 'https://openrouter.ai/api/v1/models',
+      key: env.OPENROUTER_API_KEY,
+      model: env.OPENROUTER_MODEL || 'meta-llama/llama-4-maverick:free',
+      headers: { 'HTTP-Referer': env.SITE_URL || 'https://github.com/texacoder/markcalc', 'X-Title': 'Mark Calculator' },
+      maxTokensField: 'max_tokens',
+      maxTokens: 4000,
+    };
+  }
+  if (provider === 'custom') {
+    const base = String(env.AI_BASE_URL || '').replace(/\/+$/, '');
+    return {
+      label: 'Custom AI',
+      url: `${base}/chat/completions`,
+      modelsUrl: `${base}/models`,
+      key: env.AI_API_KEY,
+      model: env.AI_MODEL || '',
+      maxTokensField: 'max_tokens',
+      maxTokens: 4000,
+    };
+  }
   const model = env.OPENAI_MODEL || 'gpt-4.1';
+  const base = env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
   return {
     label: 'OpenAI',
-    url: `${env.OPENAI_BASE_URL || 'https://api.openai.com/v1'}/chat/completions`,
+    url: `${base}/chat/completions`,
+    modelsUrl: `${base}/models`,
     key: env.OPENAI_API_KEY,
     model,
     maxTokensField: 'max_completion_tokens',
     maxTokens: isReasoningModel(model) ? 32000 : 8000,
   };
+}
+
+// Which of a service's models can read images, for the self-test report.
+function visionModels(provider, list) {
+  if (provider === 'openrouter') {
+    return list
+      .filter((m) => (m.architecture?.input_modalities || []).includes('image'))
+      .map((m) => m.id)
+      .sort((a, b) => Number(b.endsWith(':free')) - Number(a.endsWith(':free')))
+      .slice(0, 15);
+  }
+  return list.map((m) => m.id).filter((id) => /vision|llama-4|scout|maverick|gpt-4\.1|gpt-4o|gpt-5|pixtral|gemma-3|qwen.*vl/i.test(id)).slice(0, 15);
 }
 
 async function gradeWithOpenAICompatible(input, env, provider) {
@@ -406,16 +459,20 @@ async function gradeWithOpenAICompatible(input, env, provider) {
   };
   if (!isReasoningModel(cfg.model.replace(/^openai\//, ''))) body.temperature = 0;
 
-  // JSON mode with the schema written into the prompt: used when strict schemas are rejected
-  // or produce an empty reply.
-  let jsonModeUsed = false;
-  const useJsonMode = () => {
-    jsonModeUsed = true;
-    body.response_format = { type: 'json_object' };
+  // Output format, stepping down when a service rejects one or returns nothing usable:
+  // strict JSON schema → JSON mode with the schema in the prompt → the same prompt without response_format.
+  let mode = 'schema';
+  const nextMode = () => {
+    if (mode === 'plain') return false;
+    mode = mode === 'schema' ? 'json' : 'plain';
     messages[0] = {
       role: 'system',
       content: `${SYSTEM_PROMPT}\n\nReply with ONLY a JSON object (no other text) that matches this JSON Schema:\n${JSON.stringify(RESULT_SCHEMA)}`,
     };
+    if (mode === 'json') body.response_format = { type: 'json_object' };
+    else delete body.response_format;
+    console.error(`${cfg.label}: switching output format to "${mode}"`);
+    return true;
   };
 
   // The first problem seen, so later attempts don't hide it.
@@ -476,10 +533,7 @@ async function gradeWithOpenAICompatible(input, env, provider) {
           message_keys: message ? Object.keys(message) : null,
         }).slice(0, 2000),
       );
-      if (!jsonModeUsed) {
-        useJsonMode();
-        continue;
-      }
+      if (nextMode()) continue;
       if (reason === 'content_filter') throw new GradingError(FILTERED, 422);
       if (message?.refusal) throw new GradingError(DECLINED, 422);
       if (reason === 'length') throw new GradingError(`${TOO_BIG} [code: length]`, 413);
@@ -490,8 +544,7 @@ async function gradeWithOpenAICompatible(input, env, provider) {
     const shape = describeReply(res);
 
     // Some endpoints don't support strict JSON schemas: fall back to JSON mode with the schema in the prompt.
-    if (res.status === 400 && !jsonModeUsed && /response_format|json_schema|structured/i.test(res.text)) {
-      useJsonMode();
+    if (res.status === 400 && /response_format|json_schema|json_object|structured|json mode|json_validate/i.test(res.text) && nextMode()) {
       continue;
     }
     if (res.status === 400 && /content_filter|ResponsibleAIPolicyViolation|content management policy/i.test(res.text)) {
@@ -599,7 +652,9 @@ const TINY_PNG =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC';
 async function selfTest(env = process.env) {
   const provider = providerName(env);
-  if (!['github', 'openai'].includes(provider)) return { provider, note: 'Self-test covers GitHub Models and OpenAI.' };
+  if (!['github', 'openai', 'groq', 'openrouter', 'custom'].includes(provider)) {
+    return { provider, note: 'The self-test covers Groq, OpenRouter, GitHub Models, OpenAI and custom services.' };
+  }
   const cfg = openAICompatibleConfig(env, provider);
   const auth = { Authorization: `Bearer ${cfg.key}` };
   const quickEnv = { ...env, AI_TIMEOUT_MS: '60000' };
@@ -613,7 +668,7 @@ async function selfTest(env = process.env) {
   });
   const run = async (headers, extra) => {
     const started = Date.now();
-    const res = await postJson(cfg.url, { ...auth, ...headers }, { model: cfg.model, [cfg.maxTokensField]: 50, ...extra }, quickEnv);
+    const res = await postJson(cfg.url, { ...auth, ...cfg.headers, ...headers }, { model: cfg.model, [cfg.maxTokensField]: 50, ...extra }, quickEnv);
     return summary(res, started);
   };
   const plain = { messages: [{ role: 'user', content: 'Reply with the single word OK.' }] };
@@ -662,6 +717,20 @@ async function selfTest(env = process.env) {
     } catch (err) {
       report.catalog = { error: String(err), cause: err?.cause?.code };
     }
+    try {
+      const r = await fetch('https://api.github.com/user', {
+        headers: { ...auth, Accept: 'application/vnd.github+json', 'User-Agent': 'markcalc/1.0' },
+        signal: AbortSignal.timeout(20000),
+      });
+      const text = await r.text();
+      let login = '';
+      try {
+        login = JSON.parse(text).login || '';
+      } catch {}
+      report.githubApi = { status: r.status, login, rawStart: login ? '' : text.slice(0, 200) };
+    } catch (err) {
+      report.githubApi = { error: String(err) };
+    }
     report.headerSets = [];
     let working = null;
     for (const v of GITHUB_VARIANTS) {
@@ -679,6 +748,25 @@ async function selfTest(env = process.env) {
     return report;
   }
 
+  try {
+    const started = Date.now();
+    const r = await fetch(cfg.modelsUrl, { headers: { ...auth, Accept: 'application/json', ...cfg.headers }, signal: AbortSignal.timeout(20000) });
+    const text = await r.text();
+    let list = [];
+    try {
+      list = JSON.parse(text).data || [];
+    } catch {}
+    report.models = {
+      status: r.status,
+      count: list.length,
+      modelListed: list.some((m) => m.id === cfg.model),
+      canReadImages: visionModels(provider, list),
+      rawStart: list.length ? '' : text.slice(0, 300),
+      ms: Date.now() - started,
+    };
+  } catch (err) {
+    report.models = { error: String(err), cause: err?.cause?.code };
+  }
   report.plainTest = await run({}, plain);
   report.schemaTest = await run({}, schema);
   report.imageTest = await run({}, image);
@@ -690,7 +778,7 @@ async function checkProvider(env = process.env) {
   const provider = providerName(env);
   if (provider === 'mock') return { ok: true, message: 'Demo mode (MOCK_GRADER=1): fake marks, no AI calls.' };
   if (provider === 'none') {
-    return { ok: false, message: 'No GITHUB_MODELS_TOKEN, GEMINI_API_KEY or OPENAI_API_KEY set. Marking will not work.' };
+    return { ok: false, message: 'No AI key set (GROQ_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY or GITHUB_MODELS_TOKEN). Marking will not work.' };
   }
   if (provider === 'github') {
     // Validate the token without spending the daily model quota.
@@ -704,6 +792,30 @@ async function checkProvider(env = process.env) {
       return { ok: true, message: `github token OK (account ${user.login}), model "${env.GITHUB_MODEL || 'openai/gpt-4.1'}".` };
     } catch (err) {
       return { ok: false, message: `github check could not connect: ${err.message}` };
+    }
+  }
+  if (['groq', 'openrouter', 'custom', 'openai'].includes(provider)) {
+    const cfg = openAICompatibleConfig(env, provider);
+    try {
+      const res = await fetch(cfg.modelsUrl, {
+        headers: { Authorization: `Bearer ${cfg.key}`, Accept: 'application/json', ...cfg.headers },
+        signal: AbortSignal.timeout(15000),
+      });
+      const text = await res.text();
+      if (!res.ok) return { ok: false, message: `${provider} key check failed (HTTP ${res.status}): ${text.slice(0, 200).replace(/\s+/g, ' ')}` };
+      let ids = [];
+      try {
+        ids = (JSON.parse(text).data || []).map((m) => m.id);
+      } catch {}
+      const listed = ids.includes(cfg.model);
+      return {
+        ok: listed || !ids.length,
+        message: listed
+          ? `${provider} key OK, model "${cfg.model}" available.`
+          : `${provider} key OK, but model "${cfg.model}" is not in the service's model list. Open /api/selftest to see which models can read images.`,
+      };
+    } catch (err) {
+      return { ok: false, message: `${provider} check could not connect: ${err.message}` };
     }
   }
   const [url, headers, model] =
@@ -733,8 +845,9 @@ async function grade(input, env = process.env) {
   if (provider === 'mock') return mockResult(input.setup);
   let raw;
   if (provider === 'gemini' && env.GEMINI_API_KEY) raw = await gradeWithGemini(input, env);
-  else if (provider === 'github' && env.GITHUB_MODELS_TOKEN) raw = await gradeWithOpenAICompatible(input, env, 'github');
-  else if (provider === 'openai' && env.OPENAI_API_KEY) raw = await gradeWithOpenAICompatible(input, env, 'openai');
+  else if (['github', 'openai', 'groq', 'openrouter', 'custom'].includes(provider) && openAICompatibleConfig(env, provider).key) {
+    raw = await gradeWithOpenAICompatible(input, env, provider);
+  }
   else throw new GradingError('Marking is not configured on the server yet.', 503);
   return normalize(raw, input.setup.totalMarks);
 }

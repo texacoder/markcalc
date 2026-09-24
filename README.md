@@ -18,13 +18,13 @@ They click **Calculate marks** and get:
 
 Any mark can be corrected. **Mark the next student** keeps the exam details, so a whole class can be marked in a row, and the results list can be downloaded as CSV/Excel. When the page is closed, everything is gone.
 
-Marking is done by an AI vision model **on the server**: OpenAI's GPT-4.1 through free GitHub Models, Google Gemini (free tier), or OpenAI directly. Users never see the provider, the key or the prompt.
+Marking is done by an AI vision model **on the server**: Llama 4 on Groq (free), OpenRouter's free models, Google Gemini (free tier), or OpenAI (paid). Users never see the provider, the key or the prompt.
 
 ## Put it online for free
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/texacoder/markcalc)
 
-You only need a GitHub token (AI) and Render (website), both free. See **[docs/SETUP.md](docs/SETUP.md)**.
+You only need a free Groq key (AI) and Render (website). See **[docs/SETUP.md](docs/SETUP.md)**.
 
 ## Features
 
@@ -44,7 +44,7 @@ Requires Node.js 20 or newer.
 
 ```bash
 npm install
-cp .env.example .env     # put a GITHUB_MODELS_TOKEN (or GEMINI_API_KEY / OPENAI_API_KEY) in .env
+cp .env.example .env     # put a GROQ_API_KEY (or OPENROUTER / GEMINI / OPENAI key) in .env
 npm start                # open http://localhost:3000
 ```
 
@@ -54,8 +54,8 @@ No key yet? Set `MOCK_GRADER=1` in `.env` to try the whole site with fake marks.
 
 ```
 server.js            starts the server
-src/app.js           Express: /api/grade (upload + validation + limits), /api/config
-src/grader.js        prompt, GitHub Models / Gemini / OpenAI calls (structured JSON, retries, quota handling), mark normalisation
+src/app.js           Express: /api/grade (upload + validation + limits), /api/config, /api/selftest
+src/grader.js        prompt, AI calls (Groq, OpenRouter, Gemini, OpenAI, GitHub Models; format fallbacks, retries, quota handling), self-test, mark normalisation
 public/              the website (no build step)
   js/app.js          the marking page, results, session list, CSV, help
   js/pages.js        page picker (upload / camera / reorder)

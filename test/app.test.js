@@ -192,3 +192,19 @@ test('site-wide daily limit applies across teachers', async () => {
     assert.match(res.body.error, /website/);
   } finally { s.close(); }
 });
+
+test('page limit counts question paper pages and is exposed in config', async () => {
+  const s = await startServer({ MAX_PAGES: '2' });
+  try {
+    const call = client(s.base);
+    await signup(call);
+    assert.strictEqual((await call('/api/config')).body.maxPages, 2);
+    const exam = (await call('/api/exams', { method: 'POST', form: examForm({}, 1) })).body;
+    const two = sheetForm();
+    two.append('answerSheet', new Blob([png()], { type: 'image/png' }), 'p2.png');
+    const res = await call(`/api/exams/${exam.id}/grade`, { method: 'POST', form: two });
+    assert.strictEqual(res.status, 400);
+    assert.match(res.body.error, /At most 1 answer-sheet page/);
+    assert.strictEqual((await call(`/api/exams/${exam.id}/grade`, { method: 'POST', form: sheetForm() })).status, 201);
+  } finally { s.close(); }
+});

@@ -13,7 +13,11 @@ services:
         value: production
       - key: NODE_VERSION
         value: "22"
-      # Free AI key from https://aistudio.google.com/app/apikey
+      # AI for marking. Fill in ONE of these two (leave the other empty):
+      # Free GitHub token with the "Models" permission: https://github.com/settings/personal-access-tokens/new
+      - key: GITHUB_MODELS_TOKEN
+        sync: false
+      # Free Google Gemini key (needs a Google Cloud project): https://aistudio.google.com/app/apikey
       - key: GEMINI_API_KEY
         sync: false
       # Free Turso database (https://turso.tech): URL like libsql://markcalc-yourname.turso.io

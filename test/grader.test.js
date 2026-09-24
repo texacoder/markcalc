@@ -137,3 +137,34 @@ test('Gemini: daily free quota gives a clear message without retrying', async (t
   });
   assert.strictEqual(calls, 1);
 });
+
+const { maxPages } = require('../src/grader');
+
+test('GitHub Models: uses gpt-4.1, falls back to JSON mode, reports daily limit', async (t) => {
+  const bodies = [];
+  const replies = [
+    new Response('{"error":{"message":"Invalid parameter: response_format json_schema not supported"}}', { status: 400 }),
+    Response.json({ choices: [{ message: { content: JSON.stringify(GOOD) } }] }),
+  ];
+  let seen;
+  t.mock.method(globalThis, 'fetch', async (url, init) => { seen = { url, init }; bodies.push(JSON.parse(init.body)); return replies.shift(); });
+  t.mock.method(console, 'error', () => {});
+  const env = { GITHUB_MODELS_TOKEN: 'github_pat_x' };
+  assert.strictEqual(providerName(env), 'github');
+  assert.strictEqual(maxPages(env), 7);
+  const r = await grade(INPUT, env);
+  assert.strictEqual(r.totalAwarded, 6);
+  assert.strictEqual(seen.url, 'https://models.github.ai/inference/chat/completions');
+  assert.strictEqual(seen.init.headers.Authorization, 'Bearer github_pat_x');
+  assert.strictEqual(bodies[0].model, 'openai/gpt-4.1');
+  assert.strictEqual(bodies[0].max_tokens, 4000);
+  assert.strictEqual(bodies[0].response_format.type, 'json_schema');
+  assert.strictEqual(bodies[1].response_format.type, 'json_object');
+  assert.match(bodies[1].messages[0].content, /JSON Schema/);
+
+  t.mock.method(globalThis, 'fetch', async () => new Response('Rate limit of 50 per 86400s exceeded for UserByModelByDay.', { status: 429 }));
+  await assert.rejects(grade(INPUT, env), /free marking limit/);
+
+  t.mock.method(globalThis, 'fetch', async () => new Response('{"error":{"code":"tokens_limit_reached"}}', { status: 413 }));
+  await assert.rejects(grade(INPUT, env), /Too much to read/);
+});

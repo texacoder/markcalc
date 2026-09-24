@@ -3,7 +3,7 @@ const express = require('express');
 const multer = require('multer');
 const helmet = require('helmet');
 const auth = require('./auth');
-const { grade, normalize, GradingError, providerName } = require('./grader');
+const { grade, normalize, GradingError, providerName, maxPages } = require('./grader');
 
 const { HttpError } = auth;
 const MAX_FILE_MB = 10;
@@ -114,7 +114,7 @@ function createApp({ db, env = process.env }) {
   const siteUsageToday = async () => (await db.get('SELECT count FROM site_usage WHERE day = ?', today()))?.count || 0;
 
   // ---------- Auth ----------
-  api.get('/config', (req, res) => res.json({ signupCodeRequired: Boolean(signupCode) }));
+  api.get('/config', (req, res) => res.json({ signupCodeRequired: Boolean(signupCode), maxPages: maxPages(env) }));
 
   api.get('/me', async (req, res) => {
     if (!req.user) return res.json({ user: null });
@@ -339,6 +339,16 @@ function createApp({ db, env = process.env }) {
     const questionFiles = (await examFiles(exam.id, true)).map((f) => ({ mimetype: f.mimetype, buffer: Buffer.from(f.data) }));
     if (!questionFiles.length && !exam.questionText.trim()) {
       throw new HttpError(400, 'This exam has no question paper yet. Edit the exam and add it first.');
+    }
+    const pageLimit = maxPages(env);
+    if (questionFiles.length + answerFiles.length > pageLimit) {
+      const room = pageLimit - questionFiles.length;
+      throw new HttpError(
+        400,
+        room > 0
+          ? `At most ${room} answer-sheet page${room > 1 ? 's' : ''} can be marked at a time for this exam (limit ${pageLimit} pages including the question paper). Remove some pages, or type the questions in the exam setup instead of uploading question-paper photos.`
+          : `The question paper uses all ${pageLimit} pages allowed. Edit the exam and type the questions instead of uploading photos.`,
+      );
     }
     if ((await usageToday(req.user.id)) >= dailyLimit) {
       throw new HttpError(429, `You have reached today's limit of ${dailyLimit} answer sheets. It resets at midnight (UTC).`);

@@ -1,17 +1,17 @@
 # Put Mark Calculator online for free
 
-This takes about **15 minutes**, needs **no credit card** and no coding. You'll create three free accounts, copy four values, and click one button.
+About **15 minutes**, **no credit card**, no coding, and **no Google account needed**. Everything signs in with your GitHub account.
 
 | What | Service | Cost |
 |---|---|---|
-| The AI that reads and marks the answer sheets | Google Gemini API (Google AI Studio) | Free tier |
+| The AI that reads and marks answer sheets | **GitHub Models** (OpenAI GPT-4.1, the model behind ChatGPT) | Free |
 | The database (teachers, exams, results) | Turso | Free plan |
-| The website itself | Render | Free plan |
+| The website | Render | Free plan |
 
-Keep a notepad open. You'll collect these four values:
+Keep a notepad open. You'll collect these values:
 
 ```
-GEMINI_API_KEY      = AIza...
+GITHUB_MODELS_TOKEN = github_pat_...
 DATABASE_URL        = libsql://....turso.io
 DATABASE_AUTH_TOKEN = eyJ...
 SIGNUP_CODE         = (a code you make up, e.g. SUNRISE2026)
@@ -19,65 +19,80 @@ SIGNUP_CODE         = (a code you make up, e.g. SUNRISE2026)
 
 ---
 
-## Step 1: Free AI key (Google Gemini), 3 minutes
+## Step 1: Free AI token from GitHub, 3 minutes
 
-1. Go to **<https://aistudio.google.com/app/apikey>** and sign in with any Google account.
-2. Accept the terms if asked, then click **Create API key**. If it asks for a project, choose the default or create one.
-3. Copy the key (it starts with `AIza`). This is your **GEMINI_API_KEY**.
+1. Log in to GitHub, then open **<https://github.com/settings/personal-access-tokens/new>**.
+   (Or go to Profile picture → **Settings** → **Developer settings** → **Personal access tokens** → **Fine-grained tokens** → **Generate new token**.)
+2. **Token name:** `markcalc`.
+3. **Expiration:** choose **No expiration**, or the longest available. If it expires, marking stops until you make a new one.
+4. **Repository access:** leave as **Public repositories**. It doesn't matter for this.
+5. **Permissions:** click **Add permissions** (or open **Account permissions**), find **Models**, and set it to **Read-only**.
+6. Click **Generate token** and copy it (starts with `github_pat_`). This is your **GITHUB_MODELS_TOKEN**. GitHub shows it only once.
 
-Keep this key private. Don't post it anywhere or put it in GitHub. It only goes into Render in Step 3.
+Keep it private. It only goes into Render in Step 3.
 
 ---
 
 ## Step 2: Free database (Turso), 5 minutes
 
-1. Go to **<https://turso.tech>** → **Sign up** (you can use your GitHub account).
+1. Go to **<https://turso.tech>** → **Sign up** → **Continue with GitHub**.
 2. In the dashboard, click **Create Database**. Name it `markcalc`, pick the location nearest to you, and create it.
-3. Open the database. Copy its **URL**. It looks like `libsql://markcalc-yourname.turso.io`. This is your **DATABASE_URL**.
-4. On the same page, click **Create Token** (or *Generate token*). Choose *no expiration* and *read & write*, then copy the long token. This is your **DATABASE_AUTH_TOKEN**.
+3. Open the database and copy its **URL** (looks like `libsql://markcalc-yourname.turso.io`). This is your **DATABASE_URL**.
+4. On the same page, click **Create Token** (or *Generate token*). Choose *no expiration* and *read & write*, then copy it. This is your **DATABASE_AUTH_TOKEN**.
 
-You don't need to create any tables. The website does that itself on first start.
+The website creates its tables by itself.
 
 ---
 
 ## Step 3: Publish the website (Render), 5 minutes
 
-1. Open this link: **<https://render.com/deploy?repo=https://github.com/texacoder/markcalc>**
-2. Sign up or log in (choose **GitHub** or Google). Render may ask you to connect GitHub. Allow it.
-3. Render shows the **markcalc** service on the **Free** plan and asks for these values. Paste them in:
-   - `GEMINI_API_KEY`: from Step 1
-   - `DATABASE_URL`: from Step 2
-   - `DATABASE_AUTH_TOKEN`: from Step 2
-   - `SIGNUP_CODE`: a code only your teachers will know (recommended). Leave it empty to let anyone sign up.
+1. Open **<https://render.com/deploy?repo=https://github.com/texacoder/markcalc>**
+2. Sign up or log in with **GitHub** and allow access if asked.
+3. Render shows the **markcalc** service on the **Free** plan and asks for values:
+   - `GITHUB_MODELS_TOKEN`: from Step 1
+   - `GEMINI_API_KEY`: **leave empty**
+   - `DATABASE_URL`, `DATABASE_AUTH_TOKEN`: from Step 2
+   - `SIGNUP_CODE`: a code only your teachers know (recommended), or leave empty so anyone can sign up
 4. Click **Apply / Deploy Blueprint** and wait 3–5 minutes until it says **Live**.
-5. Click the link at the top, e.g. **https://markcalc.onrender.com** (yours may have extra letters). **That's your website.** Bookmark it and share it.
+5. Click the link at the top (like **https://markcalc.onrender.com**). **That's your website.**
 
-**Check it's connected:** in Render, open the service, then **Logs**. You should see
-`Marking: gemini key OK, model "gemini-flash-latest" available.`
-If it says *check failed*, the Gemini key was pasted wrongly. Fix it under **Environment** and the site restarts automatically.
+**Check it's connected:** Render → your service → **Logs** should show
+`Marking: github token OK (account texacoder), model "openai/gpt-4.1".`
+If it says *check failed*, the token was pasted wrongly or doesn't have the **Models** permission. Fix it under **Environment**; the site restarts by itself.
 
-If the one-click link doesn't work: in Render click **New → Blueprint**, choose the `texacoder/markcalc` repository, and continue from point 3.
+If the one-click link doesn't work: Render → **New → Blueprint** → choose `texacoder/markcalc` → continue from point 3.
 
 ---
 
 ## Step 4: Test with a real paper
 
-1. Open your website and click **Create an account**. Enter your signup code if you set one.
-2. Click **New exam** and fill in the exam name, total marks and marking scheme. Add a photo of the question paper, tick checking options, and click **Save**.
-3. Upload photos of an answer sheet **you have already marked by hand** and click **Calculate marks**.
-4. Compare. If the marks are off, add more detail to the marking scheme (key points and how the marks are split per question) and try again.
+1. Open your website → **Create an account**.
+2. **New exam**: fill in the name, total marks and marking scheme. Tip: **type the questions** in the "Type or paste the questions" box instead of uploading question-paper photos. That leaves more pages for the answer sheet (see limits below). Tick the checking options → **Save**.
+3. Upload photos of an answer sheet **you already marked by hand** → **Calculate marks**.
+4. Compare. If the marks are off, make the marking scheme more detailed (key points and the mark split for each question).
 
-Then send the link and signup code to your teachers. The **Help** page in the site explains everything to them. On a phone they can use the browser menu → **Add to Home Screen** to get an app icon.
+Then share the link and signup code with teachers. The **Help** page in the site explains everything.
 
 ---
 
-## What "free" means (limits to know)
+## Free limits (please read)
 
-- **Website sleeps when unused.** On Render's free plan, if nobody visits for 15 minutes, the site sleeps. The next visit takes about **30–60 seconds** to wake it, then it's fast again. This is normal. To keep it awake, add a free monitor at <https://uptimerobot.com> that opens `https://YOUR-SITE.onrender.com/healthz` every 5 minutes.
-- **AI has a daily free quota.** Google limits how many answer sheets can be marked per day and per minute on the free tier. At the time of writing that was roughly a few hundred requests per day for Flash models; see *Usage* in AI Studio. When the day's quota is used up, teachers see "Today's free marking limit has been reached. Please try again tomorrow." If you need more, enable billing on the Google project. Gemini Flash is very cheap, well under 1 cent per answer sheet.
-- **Each teacher** can mark up to `DAILY_GRADING_LIMIT` answer sheets per day (40 by default). This stops one person from using the whole free quota. Change it in Render → **Environment**.
-- **Database:** Turso's free plan holds several GB, enough for thousands of exams and results.
-- **Privacy:** answer-sheet photos are sent to Google's AI to calculate the marks and are **not stored** by the website. On Google's free tier, Google may use submitted content to improve its products. If your school needs stricter privacy, enable billing on the Google project (paid-tier data isn't used that way) or switch to OpenAI (see below).
+With the free GitHub option:
+- **About 50 answer sheets per day for the whole website.** The free quota belongs to your GitHub account and resets every 24 hours. When it runs out, teachers see "Today's free marking limit has been reached. Please try again tomorrow."
+- **Up to 7 pages per marking**, counting question-paper photos. With a typed question paper, that's 7 answer-sheet pages. The website shows teachers this limit.
+- **The website sleeps** after 15 minutes without visitors, and the next visit takes 30–60 seconds to wake it. To keep it awake, add a free monitor at <https://uptimerobot.com> that opens `https://YOUR-SITE.onrender.com/healthz` every 5 minutes.
+
+These are the limits I know of. GitHub may change them; see *GitHub Models → rate limits* in GitHub's docs.
+
+### Need more later?
+You don't have to change any code. Just swap the key in Render → **Environment**:
+- **Google Gemini (free, much bigger limits: hundreds of sheets a day, 40 pages each):** create a free project at <https://console.cloud.google.com/projectcreate> (no billing), then get a key at <https://aistudio.google.com/app/apikey>. Put it in `GEMINI_API_KEY`.
+- **OpenAI directly (paid, about 3–6 cents per sheet, no daily cap):** key from <https://platform.openai.com/api-keys> → `OPENAI_API_KEY` and set `AI_PROVIDER=openai`.
+
+If more than one key is set, the site uses Gemini first, then GitHub, then OpenAI, unless `AI_PROVIDER` says otherwise.
+
+### Privacy
+Answer-sheet photos are sent to the AI service to calculate the marks and are **not stored** by the website. Question papers, schemes and results are stored in your Turso database. Mention this in your school's privacy notice.
 
 ---
 
@@ -85,26 +100,23 @@ Then send the link and signup code to your teachers. The **Help** page in the si
 
 | Variable | Default | What it does |
 |---|---|---|
-| `GEMINI_API_KEY` | – | Free Google AI key. |
-| `OPENAI_API_KEY` | – | Paid alternative (ChatGPT models). If both keys are set, Gemini is used unless `AI_PROVIDER=openai`. |
-| `GEMINI_MODEL` | `gemini-flash-latest` | Gemini model. If it's unavailable, `gemini-2.5-flash` is tried automatically. |
-| `OPENAI_MODEL` | `gpt-4.1` | OpenAI model. |
-| `DATABASE_URL` | `file:./data/markcalc.db` | Turso URL (`libsql://…`) or a local file. On Render free it **must** be Turso, or data is lost on restart. |
+| `GITHUB_MODELS_TOKEN` | – | Free GitHub token with the Models permission. |
+| `GITHUB_MODEL` | `openai/gpt-4.1` | Model used through GitHub Models. |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | – / `gemini-flash-latest` | Google Gemini (optional). |
+| `OPENAI_API_KEY` / `OPENAI_MODEL` | – / `gpt-4.1` | OpenAI directly (optional, paid). |
+| `AI_PROVIDER` | automatic | Force `github`, `gemini` or `openai`. |
+| `MAX_PAGES` | 7 for GitHub, 40 otherwise | Pages per marking (question paper + answer sheet). |
+| `DATABASE_URL` | `file:./data/markcalc.db` | Turso URL (`libsql://…`). On Render free it **must** be Turso, or data is lost on restart. |
 | `DATABASE_AUTH_TOKEN` | – | Turso token. |
 | `SIGNUP_CODE` | empty | Teachers need this code to sign up. |
 | `DAILY_GRADING_LIMIT` | `40` | Answer sheets per teacher per day. |
 | `SITE_DAILY_LIMIT` | `0` (off) | Answer sheets for the whole site per day. |
-| `NODE_ENV` | `production` | Leave as is on Render. |
 | `MOCK_GRADER` | `0` | `1` = fake marks, no AI (for demos). |
-
-## Switching to ChatGPT (OpenAI) later
-
-OpenAI's API isn't free (about 3–6 cents per answer sheet with `gpt-4.1`). To switch, create a key at <https://platform.openai.com/api-keys> (billing required). In Render → **Environment**, add `OPENAI_API_KEY` and set `AI_PROVIDER=openai`. Teachers won't notice any difference in the site.
 
 ## Looking after the site
 
-- **Updates:** every push to the repository's default branch redeploys the site automatically. Data stays in Turso.
-- **Forgotten teacher password:** Render → service → **Shell** (on the free plan, run it on your computer instead with the same `DATABASE_URL` and `DATABASE_AUTH_TOKEN` in `.env`):
+- **Updates:** every push to the repository's default branch redeploys automatically. Data stays in Turso.
+- **Forgotten teacher password:** on your computer, put the same `DATABASE_URL` and `DATABASE_AUTH_TOKEN` in `.env`, then run
   `npm run reset-password -- teacher@school.com NewPassword123`
-- **Backups:** in the Turso dashboard you can create a backup or branch of the database at any time.
-- **Own domain (optional):** Render → service → **Settings → Custom Domains** (e.g. `marks.yourschool.com`). This is free on Render; you only pay for the domain name itself.
+- **Backups:** the Turso dashboard can create a backup or branch of the database at any time.
+- **Own domain (optional):** Render → service → **Settings → Custom Domains**.

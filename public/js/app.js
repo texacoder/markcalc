@@ -229,7 +229,8 @@ async function examEditorView(id) {
 
       <section class="card">
         <h2><span class="step">3</span> Question paper</h2>
-        <p class="hint">Upload a photo of each page or a PDF. You can also type the questions instead.</p>
+        <p class="hint">Upload a photo of each page or a PDF. You can also type the questions instead.
+          ${state.config.maxPages < 20 ? `Tip: each marking can read ${state.config.maxPages} pages in total, so typing the questions leaves more room for the answer sheet.` : ''}</p>
         <div id="qp-picker"></div>
         <details ${exam.questionText ? 'open' : ''}>
           <summary>Type or paste the questions (optional)</summary>
@@ -366,13 +367,19 @@ async function markingView(id) {
     <section class="card" id="class-results"></section>`,
   );
 
+  const room = Math.max(0, (state.config.maxPages || 40) - exam.files.length);
   const picker = new PagePicker($('#as-picker'), {
     label: "Add the student's answer sheet",
-    hint: 'All pages, in order. Phone photos or a PDF.',
+    hint: room < 20 ? `All pages, in order (up to ${room}). Phone photos or a PDF.` : 'All pages, in order. Phone photos or a PDF.',
     onChange: (n) => {
       const btn = $('#mark-btn');
-      btn.disabled = n === 0;
-      btn.textContent = n ? `Calculate marks (${n} page${n > 1 ? 's' : ''})` : 'Calculate marks';
+      btn.disabled = n === 0 || n > room;
+      btn.textContent =
+        n > room
+          ? `Too many pages (max ${room})`
+          : n
+            ? `Calculate marks (${n} page${n > 1 ? 's' : ''})`
+            : 'Calculate marks';
     },
   });
 

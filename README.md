@@ -10,13 +10,13 @@ A teacher sets up an exam once: syllabus, marking scheme or answer key, question
 
 Teachers can correct any mark; the total updates automatically.
 
-Marking is done by an AI vision model **on the server**: Google Gemini (free tier) by default, or OpenAI's ChatGPT models. Teachers never see the provider, the key or the prompt.
+Marking is done by an AI vision model **on the server**: OpenAI's GPT-4.1 through free GitHub Models, Google Gemini (free tier), or OpenAI directly. Teachers never see the provider, the key or the prompt.
 
 ## Put it online for free
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/texacoder/markcalc)
 
-Everything runs on free plans: Gemini API (AI), Turso (database) and Render (website). Follow **[docs/SETUP.md](docs/SETUP.md)**. It takes about 15 minutes and no credit card.
+Everything runs on free plans: GitHub Models (AI), Turso (database) and Render (website), all with your GitHub login. Follow **[docs/SETUP.md](docs/SETUP.md)**. It takes about 15 minutes and no credit card.
 
 ## Features
 
@@ -37,7 +37,7 @@ Requires Node.js 20 or newer.
 
 ```bash
 npm install
-cp .env.example .env     # put your free GEMINI_API_KEY (or an OPENAI_API_KEY) in .env
+cp .env.example .env     # put a GITHUB_MODELS_TOKEN (or GEMINI_API_KEY / OPENAI_API_KEY) in .env
 npm start                # open http://localhost:3000
 ```
 
@@ -50,7 +50,7 @@ No key yet? Set `MOCK_GRADER=1` in `.env` to try the whole app with fake marks.
 ```
 server.js            starts the server (reads .env, opens the database)
 src/app.js           Express routes: auth, exams, grading, results, CSV
-src/grader.js        prompt, Gemini / OpenAI calls (structured JSON, retries, quota handling), mark normalisation
+src/grader.js        prompt, GitHub Models / Gemini / OpenAI calls (structured JSON, retries, quota handling), mark normalisation
 src/auth.js          password hashing, sessions, rate limiting
 src/db.js            SQLite schema via libSQL (local file or Turso)
 public/              the website (no build step)

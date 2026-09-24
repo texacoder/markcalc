@@ -209,10 +209,19 @@ const UNREADABLE = 'This answer sheet could not be marked. Check that the photos
 function providerName(env) {
   if (env.MOCK_GRADER === '1') return 'mock';
   const chosen = String(env.AI_PROVIDER || '').toLowerCase();
-  if (chosen === 'gemini' || chosen === 'openai') return chosen;
+  if (['gemini', 'github', 'openai'].includes(chosen)) return chosen;
   if (env.GEMINI_API_KEY) return 'gemini';
+  if (env.GITHUB_MODELS_TOKEN) return 'github';
   if (env.OPENAI_API_KEY) return 'openai';
   return 'none';
+}
+
+// Most pages (question paper + answer sheet) the provider can read in one marking.
+// GitHub Models' free tier allows ~8000 input tokens per request (~765 tokens per page).
+function maxPages(env) {
+  const configured = Number(env.MAX_PAGES);
+  if (configured > 0) return configured;
+  return providerName(env) === 'github' ? 7 : 40;
 }
 
 async function postJson(url, headers, body, env) {
@@ -249,34 +258,78 @@ function isReasoningModel(model) {
   return /^(gpt-5|o\d)/i.test(model);
 }
 
-async function gradeWithOpenAI(input, env) {
+const TOO_BIG = 'Too much to read in one go. Use fewer pages, or type the questions in the exam setup instead of uploading question-paper photos.';
+
+// OpenAI and GitHub Models share the same chat-completions format.
+function openAICompatibleConfig(env, provider) {
+  if (provider === 'github') {
+    return {
+      label: 'GitHub Models',
+      url: `${env.GITHUB_MODELS_BASE_URL || 'https://models.github.ai/inference'}/chat/completions`,
+      key: env.GITHUB_MODELS_TOKEN,
+      model: env.GITHUB_MODEL || 'openai/gpt-4.1',
+      maxTokensField: 'max_tokens',
+      maxTokens: 4000,
+    };
+  }
   const model = env.OPENAI_MODEL || 'gpt-4.1';
-  const body = {
+  return {
+    label: 'OpenAI',
+    url: `${env.OPENAI_BASE_URL || 'https://api.openai.com/v1'}/chat/completions`,
+    key: env.OPENAI_API_KEY,
     model,
-    messages: buildMessages(input),
-    max_completion_tokens: isReasoningModel(model) ? 32000 : 8000,
+    maxTokensField: 'max_completion_tokens',
+    maxTokens: isReasoningModel(model) ? 32000 : 8000,
+  };
+}
+
+async function gradeWithOpenAICompatible(input, env, provider) {
+  const cfg = openAICompatibleConfig(env, provider);
+  const messages = buildMessages(input);
+  const body = {
+    model: cfg.model,
+    messages,
+    [cfg.maxTokensField]: cfg.maxTokens,
     response_format: {
       type: 'json_schema',
       json_schema: { name: 'grading_result', strict: true, schema: RESULT_SCHEMA },
     },
   };
-  if (!isReasoningModel(model)) body.temperature = 0;
+  if (!isReasoningModel(cfg.model.replace(/^openai\//, ''))) body.temperature = 0;
 
-  const url = `${env.OPENAI_BASE_URL || 'https://api.openai.com/v1'}/chat/completions`;
+  let schemaFallbackUsed = false;
   for (let attempt = 1; ; attempt++) {
-    const res = await postJson(url, { Authorization: `Bearer ${env.OPENAI_API_KEY}` }, body, env);
+    const res = await postJson(cfg.url, { Authorization: `Bearer ${cfg.key}` }, body, env);
     if (res.ok) {
       const message = res.json?.choices?.[0]?.message;
       if (!message || message.refusal || !message.content) throw new GradingError(UNREADABLE, 422);
       return parseResultText(message.content);
     }
-    console.error(`OpenAI error (attempt ${attempt})`, res.status, res.text.slice(0, 800));
+    console.error(`${cfg.label} error (attempt ${attempt})`, res.status, res.text.slice(0, 800));
+
+    // Some endpoints don't support strict JSON schemas: fall back to JSON mode with the schema in the prompt.
+    if (res.status === 400 && !schemaFallbackUsed && /response_format|json_schema|structured/i.test(res.text)) {
+      schemaFallbackUsed = true;
+      body.response_format = { type: 'json_object' };
+      messages[0] = {
+        role: 'system',
+        content: `${SYSTEM_PROMPT}\n\nReply with ONLY a JSON object that matches this JSON Schema:\n${JSON.stringify(RESULT_SCHEMA)}`,
+      };
+      continue;
+    }
+    if (res.status === 413 || /tokens_limit_reached|too large|maximum context|max.*tokens/i.test(res.text)) {
+      throw new GradingError(TOO_BIG, 413);
+    }
+    if (res.status === 429 && /86400|per day|daily|ByDay/i.test(res.text)) {
+      throw new GradingError("Today's free marking limit has been reached. Please try again tomorrow.", 429);
+    }
     const retryable = res.status === 0 || res.status === 429 || res.status >= 500;
     if (retryable && attempt < 3) {
-      await sleep(2000 * attempt ** 2);
+      await sleep(res.status === 429 ? 15000 * attempt : 2000 * attempt ** 2);
       continue;
     }
     if (res.status === 429) throw new GradingError(BUSY, 503);
+    if (res.status === 401 || res.status === 403) console.error(`${cfg.label}: the key/token is invalid or lacks permission.`);
     throw new GradingError(FAILED);
   }
 }
@@ -350,7 +403,23 @@ async function gradeWithGemini(input, env) {
 async function checkProvider(env = process.env) {
   const provider = providerName(env);
   if (provider === 'mock') return { ok: true, message: 'Demo mode (MOCK_GRADER=1): fake marks, no AI calls.' };
-  if (provider === 'none') return { ok: false, message: 'No GEMINI_API_KEY or OPENAI_API_KEY set. Marking will not work.' };
+  if (provider === 'none') {
+    return { ok: false, message: 'No GITHUB_MODELS_TOKEN, GEMINI_API_KEY or OPENAI_API_KEY set. Marking will not work.' };
+  }
+  if (provider === 'github') {
+    // Validate the token without spending the daily model quota.
+    try {
+      const res = await fetch('https://api.github.com/user', {
+        headers: { Authorization: `Bearer ${env.GITHUB_MODELS_TOKEN}`, 'User-Agent': 'markcalc' },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) return { ok: false, message: `github token check failed (HTTP ${res.status}). Create a new token with the "Models" permission.` };
+      const user = await res.json();
+      return { ok: true, message: `github token OK (account ${user.login}), model "${env.GITHUB_MODEL || 'openai/gpt-4.1'}".` };
+    } catch (err) {
+      return { ok: false, message: `github check could not connect: ${err.message}` };
+    }
+  }
   const [url, headers, model] =
     provider === 'gemini'
       ? [
@@ -378,7 +447,8 @@ async function grade(input, env = process.env) {
   if (provider === 'mock') return mockResult(input.setup);
   let raw;
   if (provider === 'gemini' && env.GEMINI_API_KEY) raw = await gradeWithGemini(input, env);
-  else if (provider === 'openai' && env.OPENAI_API_KEY) raw = await gradeWithOpenAI(input, env);
+  else if (provider === 'github' && env.GITHUB_MODELS_TOKEN) raw = await gradeWithOpenAICompatible(input, env, 'github');
+  else if (provider === 'openai' && env.OPENAI_API_KEY) raw = await gradeWithOpenAICompatible(input, env, 'openai');
   else throw new GradingError('Marking is not configured on the server yet.', 503);
   return normalize(raw, input.setup.totalMarks);
 }
@@ -391,6 +461,7 @@ module.exports = {
   toGeminiSchema,
   instructionText,
   providerName,
+  maxPages,
   checkProvider,
   GradingError,
   RESULT_SCHEMA,

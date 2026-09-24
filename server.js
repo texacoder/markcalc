@@ -8,10 +8,10 @@ const dbUrl = process.env.DATABASE_URL || 'file:./data/markcalc.db';
 
 (async () => {
   if (providerName(process.env) === 'none') {
-    console.warn('WARNING: no GEMINI_API_KEY or OPENAI_API_KEY set. Marking will fail until one is configured.');
+    console.warn('WARNING: no GITHUB_MODELS_TOKEN, GEMINI_API_KEY or OPENAI_API_KEY set. Marking will fail until one is configured.');
   }
   if (process.env.RENDER && dbUrl.startsWith('file:')) {
-    console.warn('WARNING: using a local database file on Render. Without a disk, data is lost on restart. Set DATABASE_URL to a Turso database.');
+    console.warn('WARNING: using a local database file on Render. Without a disk, data is lost on restart. Set DATABASE_URL to your Neon (postgresql://...) or Turso database.');
   }
 
   const db = await openDb({ url: dbUrl, authToken: process.env.DATABASE_AUTH_TOKEN }).catch((err) => {

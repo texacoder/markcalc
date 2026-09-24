@@ -234,7 +234,7 @@ test('GitHub Models: refusals and content filters give specific messages', async
   await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: filter\]/);
 
   t.mock.method(globalThis, 'fetch', async () => new Response('bad credentials', { status: 401 }));
-  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: auth-401\]/);
+  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: http-401-text; backup auth-401\]/);
 });
 
 test('GitHub Models: sends GitHub headers; odd replies fall back to the older endpoint', async (t) => {
@@ -264,5 +264,53 @@ test('GitHub Models: sends GitHub headers; odd replies fall back to the older en
 
   // Both endpoints give nothing usable: a specific code.
   t.mock.method(globalThis, 'fetch', async () => Response.json({ choices: [] }));
-  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: no-choices-200\]/);
+  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: reply-200-keys:choices; backup reply-200-keys:choices\]/);
+});
+
+test('OpenAI-compatible replies: streamed and "responses" formats are understood', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  const json = JSON.stringify(GOOD);
+  const sse = ['data: ' + JSON.stringify({ choices: [{ delta: { content: json.slice(0, 40) } }] }),
+    'data: ' + JSON.stringify({ choices: [{ delta: { content: json.slice(40) } }] }), 'data: [DONE]', ''].join('\n');
+  t.mock.method(globalThis, 'fetch', async () => new Response(sse, { headers: { 'content-type': 'text/event-stream' } }));
+  assert.strictEqual((await grade(INPUT, { GITHUB_MODELS_TOKEN: 't' })).totalAwarded, 6);
+
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ output: [{ content: [{ type: 'output_text', text: json }] }] }));
+  assert.strictEqual((await grade(INPUT, { GITHUB_MODELS_TOKEN: 't' })).totalAwarded, 6);
+});
+
+test('a missing backup endpoint does not hide the main problem, and is not retried', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    calls++;
+    if (String(url).includes('models.github.ai')) return new Response('<html>oops</html>', { status: 200 });
+    const err = new TypeError('fetch failed');
+    err.cause = { code: 'ENOTFOUND', message: 'getaddrinfo ENOTFOUND' };
+    throw err;
+  });
+  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: reply-200-html; backup http-network-ENOTFOUND\]/);
+  assert.strictEqual(calls, 2);
+});
+
+const { selfTest } = require('../src/grader');
+
+test('selfTest reports what each endpoint returned', async (t) => {
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    const body = JSON.parse(init.body);
+    if (String(url).includes('models.github.ai')) {
+      return body.response_format ? new Response('{"error":{"message":"bad schema"}}', { status: 400 }) : Response.json({ choices: [{ message: { content: 'OK' } }] });
+    }
+    const err = new TypeError('fetch failed');
+    err.cause = { code: 'ENOTFOUND' };
+    throw err;
+  });
+  const r = await selfTest({ GITHUB_MODELS_TOKEN: 't' });
+  assert.strictEqual(r.provider, 'github');
+  const main = r.results.filter((x) => x.endpoint.includes('models.github.ai'));
+  assert.deepStrictEqual(main.map((x) => [x.test, x.status]), [['plain', 200], ['schema', 400], ['image', 200]]);
+  assert.strictEqual(main[0].replyText, 'OK');
+  const backup = r.results.filter((x) => !x.endpoint.includes('models.github.ai'));
+  assert.strictEqual(backup.length, 1); // stops after ENOTFOUND
+  assert.strictEqual(backup[0].shape, 'network-ENOTFOUND');
 });

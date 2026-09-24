@@ -4,7 +4,7 @@ const path = require('path');
 const express = require('express');
 const multer = require('multer');
 const helmet = require('helmet');
-const { grade, GradingError, providerName, maxPages, requestTooLarge } = require('./grader');
+const { grade, GradingError, providerName, maxPages, requestTooLarge, selfTest } = require('./grader');
 
 const MAX_FILE_MB = 10;
 const SETUP_FIELDS = ['subject', 'className', 'totalMarks', 'syllabus', 'scheme', 'extra', 'questionText', 'instructions', 'answerText'];
@@ -151,6 +151,15 @@ function createApp({ env = process.env } = {}) {
   api.get('/config', (req, res) =>
     res.json({ maxPages: maxPages(env), perDeviceLimit, imageMaxSide, usedToday: usage.get(`ip:${clientIp(req)}`) }),
   );
+
+  // Connection test for the site owner: open /api/selftest in a browser. Uses a few AI requests,
+  // so it counts towards the per-device daily limit.
+  api.get('/selftest', async (req, res) => {
+    const ipKey = `ip:${clientIp(req)}`;
+    if (usage.get(ipKey) >= perDeviceLimit) throw new HttpError(429, 'Daily limit reached for this device.');
+    usage.add(ipKey);
+    res.set('Cache-Control', 'no-store').json(await selfTest(env));
+  });
 
   api.post(
     '/grade',

@@ -270,8 +270,51 @@ async function postJson(url, headers, body, env) {
     const ok = res.status >= 200 && res.status < 300;
     return { status: res.status, ok, json, text, contentType: res.headers.get('content-type') || '' };
   } catch (err) {
-    return { status: 0, ok: false, json: null, text: String(err) };
+    // Network-level failure: keep the underlying reason (ENOTFOUND, ECONNRESET, timeout…).
+    const cause = err?.name === 'TimeoutError' || err?.name === 'AbortError' ? 'timeout' : err?.cause?.code || err?.code || 'network';
+    return { status: 0, ok: false, json: null, text: `${err} (${cause}) ${err?.cause?.message || ''}`, cause };
   }
+}
+
+// Short description of an unexpected reply, safe to show to users (no provider names or content).
+function describeReply(res) {
+  if (res.status === 0) return `network-${res.cause}`;
+  if (res.json && typeof res.json === 'object') return `${res.status}-keys:${Object.keys(res.json).slice(0, 4).join('.') || 'none'}`;
+  const t = String(res.text || '').trim();
+  if (!t) return `${res.status}-empty`;
+  if (t.startsWith('<')) return `${res.status}-html`;
+  if (/^(data|event):/m.test(t)) return `${res.status}-stream`;
+  return `${res.status}-text`;
+}
+
+// The reply's text in any of the shapes an OpenAI-compatible service may use:
+// a chat completion, a streamed chat completion (server-sent events), or the newer "responses" format.
+function replyText(res) {
+  const j = res.json;
+  if (j) {
+    const fromChat = messageText(j.choices?.[0]?.message);
+    if (fromChat) return fromChat;
+    if (typeof j.output_text === 'string' && j.output_text) return j.output_text;
+    if (Array.isArray(j.output)) {
+      const parts = j.output.flatMap((o) => (Array.isArray(o?.content) ? o.content : [])).map((c) => c?.text || '');
+      if (parts.join('')) return parts.join('');
+    }
+    return '';
+  }
+  const t = String(res.text || '');
+  if (/^data:/m.test(t)) {
+    let out = '';
+    for (const line of t.split('\n')) {
+      const data = line.startsWith('data:') ? line.slice(5).trim() : '';
+      if (!data || data === '[DONE]') continue;
+      try {
+        const chunk = JSON.parse(data);
+        out += chunk.choices?.[0]?.delta?.content || messageText(chunk.choices?.[0]?.message) || '';
+      } catch {}
+    }
+    return out;
+  }
+  return '';
 }
 
 function parseResultText(text) {
@@ -363,44 +406,51 @@ async function gradeWithOpenAICompatible(input, env, provider) {
     };
   };
 
-  for (let attempt = 1; ; attempt++) {
+  // What went wrong on the main endpoint, so a failing backup doesn't hide it.
+  let primaryProblem = '';
+  const fail = (message, code, status = 502) =>
+    new GradingError(`${message} [code: ${primaryProblem ? `${primaryProblem}; backup ${code}` : code}]`, status);
+  // Switch to the backup endpoint (once). Returns false if there is none.
+  const useFallback = (problem) => {
+    if (!cfg.fallback) return false;
+    primaryProblem = problem;
+    console.error(`${cfg.label}: main endpoint problem "${problem}", trying the backup endpoint ${cfg.fallback.url}`);
+    Object.assign(cfg, cfg.fallback, { fallback: null });
+    body.model = cfg.model;
+    return true;
+  };
+
+  let networkRetries = 0;
+  for (let attempt = 1; attempt <= 8; attempt++) {
     const res = await postJson(cfg.url, { Authorization: `Bearer ${cfg.key}`, ...cfg.headers }, body, env);
+
     if (res.ok) {
       const choice = res.json?.choices?.[0];
       const message = choice?.message;
-      const text = messageText(message);
+      const text = replyText(res);
       if (text && !message?.refusal) return parseResultText(text);
 
-      // Not a chat completion at all (wrong endpoint, HTML page, empty choices): log the raw reply.
       if (!choice) {
-        console.error(
-          `${cfg.label}: unexpected reply (attempt ${attempt}) from ${cfg.url}`,
-          res.status,
-          res.contentType,
-          res.text.slice(0, 1500),
-        );
-        const filtered = JSON.stringify(res.json?.prompt_filter_results || '').includes('"filtered":true');
-        if (filtered) throw new GradingError(FILTERED, 422);
-        if (cfg.fallback) {
-          console.error(`${cfg.label}: trying the fallback endpoint ${cfg.fallback.url}`);
-          Object.assign(cfg, cfg.fallback, { fallback: null });
-          body.model = cfg.model;
-          continue;
-        }
-        throw new GradingError(`${UNREADABLE} [code: ${res.json ? 'no-choices' : 'not-json'}-${res.status}]`, 422);
+        // Not a chat completion: log the raw reply so the cause can be seen in the server logs.
+        const shape = describeReply(res);
+        console.error(`${cfg.label}: unexpected reply (attempt ${attempt}) from ${cfg.url}`, res.status, res.contentType, res.text.slice(0, 1500));
+        if (JSON.stringify(res.json?.prompt_filter_results || '').includes('"filtered":true')) throw new GradingError(FILTERED, 422);
+        if (useFallback(`reply-${shape}`)) continue;
+        throw fail(UNREADABLE, `reply-${shape}`, 422);
       }
 
-      // A reply without usable content: record why, then retry once in JSON mode.
-      const reason = choice?.finish_reason || 'none';
+      // A chat completion without usable content: record why, then retry once in JSON mode.
+      const reason = choice.finish_reason || 'none';
       console.error(
         `${cfg.label}: reply had no marks (attempt ${attempt})`,
         JSON.stringify({
           finish_reason: reason,
           refusal: message?.refusal || null,
-          content_filter_results: choice?.content_filter_results,
+          content_filter_results: choice.content_filter_results,
           prompt_filter_results: res.json?.prompt_filter_results,
           model: res.json?.model,
           usage: res.json?.usage,
+          message_keys: message ? Object.keys(message) : null,
         }).slice(0, 2000),
       );
       if (!jsonModeUsed) {
@@ -410,9 +460,11 @@ async function gradeWithOpenAICompatible(input, env, provider) {
       if (reason === 'content_filter') throw new GradingError(FILTERED, 422);
       if (message?.refusal) throw new GradingError(DECLINED, 422);
       if (reason === 'length') throw new GradingError(`${TOO_BIG} [code: length]`, 413);
-      throw new GradingError(`${UNREADABLE} [code: empty-${reason}]`, 422);
+      throw fail(UNREADABLE, `empty-${reason}`, 422);
     }
-    console.error(`${cfg.label} error (attempt ${attempt})`, res.status, res.text.slice(0, 800));
+
+    console.error(`${cfg.label} error (attempt ${attempt}) from ${cfg.url}`, res.status, res.text.slice(0, 800));
+    const shape = describeReply(res);
 
     // Some endpoints don't support strict JSON schemas: fall back to JSON mode with the schema in the prompt.
     if (res.status === 400 && !jsonModeUsed && /response_format|json_schema|structured/i.test(res.text)) {
@@ -429,24 +481,25 @@ async function gradeWithOpenAICompatible(input, env, provider) {
     if (res.status === 429 && /86400|per day|daily|ByDay/i.test(res.text)) {
       throw new GradingError("Today's free marking limit has been reached. Please try again tomorrow.", 429);
     }
-    const retryable = res.status === 0 || res.status === 429 || res.status >= 500;
-    if (retryable && attempt < 3) {
-      await sleep(res.status === 429 ? 15000 * attempt : 2000 * attempt ** 2);
+    // Temporary problems: wait and retry (not for addresses that don't exist).
+    const permanentNetwork = res.status === 0 && ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'CERT_HAS_EXPIRED'].includes(res.cause);
+    const temporary = (res.status === 0 && !permanentNetwork) || res.status === 429 || res.status >= 500;
+    if (temporary && networkRetries < 2) {
+      networkRetries += 1;
+      await sleep(res.status === 429 ? 15000 * networkRetries : 2000 * networkRetries ** 2);
       continue;
     }
-    if (res.status === 429) throw new GradingError(BUSY, 503);
-    if (cfg.fallback && ((res.status >= 300 && res.status < 400) || [401, 403, 404, 405].includes(res.status))) {
-      console.error(`${cfg.label}: trying the fallback endpoint ${cfg.fallback.url}`);
-      Object.assign(cfg, cfg.fallback, { fallback: null });
-      body.model = cfg.model;
-      continue;
+    if ((res.status >= 300 && res.status < 400) || [401, 403, 404, 405].includes(res.status) || permanentNetwork) {
+      if (useFallback(`http-${shape}`)) {
+        networkRetries = 0;
+        continue;
+      }
     }
-    if (res.status === 401 || res.status === 403) {
-      console.error(`${cfg.label}: the key/token is invalid or lacks permission.`);
-      throw new GradingError(`${FAILED} [code: auth-${res.status}]`);
-    }
-    throw new GradingError(`${FAILED} [code: http-${res.status}]`);
+    if (res.status === 429) throw fail(BUSY, `http-${shape}`, 503);
+    if (res.status === 401 || res.status === 403) console.error(`${cfg.label}: the key/token is invalid or lacks permission.`);
+    throw fail(FAILED, res.status === 401 || res.status === 403 ? `auth-${res.status}` : `http-${shape}`);
   }
+  throw fail(FAILED, 'too-many-attempts');
 }
 
 // ---------------- Gemini ----------------
@@ -520,6 +573,64 @@ async function gradeWithGemini(input, env) {
   }
 }
 
+// On-demand connection test (GET /api/selftest): three tiny requests (plain text, strict JSON schema,
+// an image) against the configured OpenAI-compatible endpoint(s), reporting exactly what came back.
+const TINY_PNG =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC';
+async function selfTest(env = process.env) {
+  const provider = providerName(env);
+  if (!['github', 'openai'].includes(provider)) return { provider, note: 'Self-test covers GitHub Models and OpenAI.' };
+  const cfg = openAICompatibleConfig(env, provider);
+  const endpoints = [{ url: cfg.url, model: cfg.model, headers: cfg.headers || {} }];
+  if (cfg.fallback) endpoints.push(cfg.fallback);
+  const tests = {
+    plain: { messages: [{ role: 'user', content: 'Reply with the single word OK.' }] },
+    schema: {
+      messages: [{ role: 'user', content: 'Set ok to true.' }],
+      response_format: {
+        type: 'json_schema',
+        json_schema: { name: 'check', strict: true, schema: { type: 'object', additionalProperties: false, required: ['ok'], properties: { ok: { type: 'boolean' } } } },
+      },
+    },
+    image: {
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'What colour is this image? One word.' },
+            { type: 'image_url', image_url: { url: `data:image/png;base64,${TINY_PNG}`, detail: 'high' } },
+          ],
+        },
+      ],
+    },
+  };
+  const results = [];
+  for (const ep of endpoints) {
+    for (const [name, extra] of Object.entries(tests)) {
+      const started = Date.now();
+      const res = await postJson(
+        ep.url,
+        { Authorization: `Bearer ${cfg.key}`, ...ep.headers },
+        { model: ep.model, [cfg.maxTokensField]: 50, ...extra },
+        { ...env, AI_TIMEOUT_MS: '60000' },
+      );
+      results.push({
+        endpoint: ep.url,
+        model: ep.model,
+        test: name,
+        status: res.status,
+        contentType: res.contentType || '',
+        shape: describeReply(res),
+        replyText: replyText(res).slice(0, 200),
+        rawStart: String(res.text || '').slice(0, 400),
+        ms: Date.now() - started,
+      });
+      if (res.status === 0 && ['ENOTFOUND', 'EAI_AGAIN'].includes(res.cause)) break; // endpoint doesn't exist
+    }
+  }
+  return { provider, results };
+}
+
 // Startup self-check so setup mistakes (bad key, unknown model) show up clearly in the server logs.
 async function checkProvider(env = process.env) {
   const provider = providerName(env);
@@ -585,6 +696,7 @@ module.exports = {
   maxPages,
   requestTooLarge,
   checkProvider,
+  selfTest,
   GradingError,
   RESULT_SCHEMA,
 };

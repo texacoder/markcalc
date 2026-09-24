@@ -41,7 +41,7 @@ const SYSTEM_PROMPT = `You are an experienced, fair examiner. The exam can be fr
 
 How to grade:
 1. Read the question paper and identify every question/sub-question and its maximum marks (marks are usually printed beside each question). If the teacher gives a total, the maxima must add up to it.
-2. Read ALL answer-sheet pages. Students may answer out of order, continue answers on later pages, or label answers differently; match each answer to the right question. Ignore crossed-out work.
+2. Read ALL of the student's answers (answer-sheet images and/or typed answers). Students may answer out of order, continue answers on later pages, or label answers differently; match each answer to the right question. Ignore crossed-out work.
 3. Grade each question with the marking scheme as the main authority. Where the scheme is silent, use the syllabus and the standard expectations for that subject and level (class, course or year).
 4. Follow the teacher's instructions exactly. They override your default strictness (e.g. liberal checking, marks for diagrams alone, step marks).
 5. Unless the teacher says otherwise: award partial marks for partially correct answers, use whole or half marks only, and never exceed a question's maximum.
@@ -72,11 +72,11 @@ function instructionText(setup) {
 }
 
 // Provider-neutral list of text and image parts.
-function buildParts({ setup, questionFiles, answerFiles }) {
+function buildParts({ setup, questionFiles = [], answerFiles = [], syllabusFiles = [], schemeFiles = [] }) {
   const content = [
     textPart(
       [
-        section('Subject / class', [setup.subject, setup.className].filter(Boolean).join(' — ')),
+        section('Subject / class or course', [setup.subject, setup.className].filter(Boolean).join(' — ')),
         section('Total marks of the paper', setup.totalMarks),
         section('Syllabus', setup.syllabus),
         section('Marking scheme / answer key', setup.scheme),
@@ -87,13 +87,18 @@ function buildParts({ setup, questionFiles, answerFiles }) {
     ),
   ];
 
-  if (questionFiles.length) {
-    content.push(textPart(`## Question paper images (${questionFiles.length} page(s))`));
-    content.push(...imageParts(questionFiles));
-  }
+  const images = (title, files) => {
+    if (!files.length) return;
+    content.push(textPart(`## ${title} (${files.length} page image(s), in order)`));
+    content.push(...imageParts(files));
+  };
+  images('Syllabus', syllabusFiles);
+  images('Marking scheme / answer key', schemeFiles);
+  images('Question paper', questionFiles);
 
-  content.push(textPart(`## Student answer sheet (${answerFiles.length} page(s), in order)`));
-  content.push(...imageParts(answerFiles));
+  const typedAnswers = String(setup.answerText || '').trim();
+  if (typedAnswers) content.push(textPart(`## Student's answers (typed)\n${typedAnswers}`));
+  images('Student answer sheet', answerFiles);
   return content;
 }
 

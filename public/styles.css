@@ -261,3 +261,5 @@ td.num, th.num { text-align: right; white-space: nowrap; font-variant-numeric: t
 @media (max-width: 480px) {
   .brand span { display: none; }
 }
+.upload-details { margin: 10px 0 14px; }
+.upload-details[open] > summary { margin-bottom: 10px; }

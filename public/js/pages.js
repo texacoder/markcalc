@@ -5,11 +5,15 @@ import { prepareFiles } from './files.js';
 let uid = 0;
 
 export class PagePicker {
-  constructor(root, { label, hint, onChange, maxSide } = {}) {
+  // extractText: typed PDFs / .txt files are turned into text and passed to onText(text, fileName)
+  // instead of being added as page images.
+  constructor(root, { label, hint, onChange, onText, maxSide, extractText = false } = {}) {
     this.root = root;
     this.items = [];
     this.onChange = onChange;
+    this.onText = onText;
     this.maxSide = maxSide;
+    this.extractText = extractText;
     this.busy = false;
     const id = `pp${++uid}`;
 
@@ -24,7 +28,7 @@ export class PagePicker {
             <label class="btn" for="${id}-files">Choose files</label>
             <label class="btn ghost camera-btn" for="${id}-camera">Take photo</label>
           </div>
-          <input type="file" id="${id}-files" accept="image/*,application/pdf" multiple hidden />
+          <input type="file" id="${id}-files" accept="image/*,application/pdf,.pdf,.txt,text/plain" multiple hidden />
           <input type="file" id="${id}-camera" accept="image/*" capture="environment" hidden />
         </div>
         <p class="drop-status muted" hidden></p>
@@ -61,8 +65,13 @@ export class PagePicker {
     this.busy = true;
     this.status.hidden = false;
     try {
-      const blobs = await prepareFiles(files, (msg) => (this.status.textContent = msg), this.maxSide);
-      for (const blob of blobs) this.items.push({ key: `n${++uid}`, blob, url: URL.createObjectURL(blob) });
+      const { images, texts } = await prepareFiles(files, {
+        onProgress: (msg) => (this.status.textContent = msg),
+        maxSide: this.maxSide,
+        extractText: this.extractText,
+      });
+      for (const blob of images) this.items.push({ key: `n${++uid}`, blob, url: URL.createObjectURL(blob) });
+      for (const { name, text } of texts) this.onText?.(text, name);
       this.render();
     } catch (err) {
       toast(err.message, 'error');

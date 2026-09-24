@@ -90,7 +90,7 @@ Open the link on a phone, use **Take photo** for each page, and mark a sheet. (T
 ## Free limits (please read)
 
 - **About 50 markings per day for the whole website** (the GitHub free quota). When it runs out, users see "Today's free marking limit has been reached. Please try again tomorrow."
-- **Up to 7 pages per marking**, counting question-paper photos. Typing the questions leaves all 7 pages for the answer sheet.
+- **Up to 7 page images per marking**, counting photos and scanned pages from every section. Typed text, .txt files and typed (non-scanned) PDFs don't count, because their text is copied into the boxes.
 - **15 markings per device per day** (`PER_DEVICE_DAILY_LIMIT`), so one person can't use up everyone's quota. There's no login, so this is counted by internet address. It resets at midnight UTC or whenever the server restarts.
 - **The site sleeps** after 15 minutes without visitors. The next visit takes 30–60 seconds. To keep it awake, add a free monitor at <https://uptimerobot.com> for `https://YOUR-SITE.onrender.com/healthz`, every 5 minutes.
 

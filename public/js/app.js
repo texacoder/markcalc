@@ -62,12 +62,20 @@ function renderMarkPage() {
           <label>Syllabus / topics covered <small class="muted">(optional)</small>
             <textarea name="syllabus" rows="2" placeholder="e.g. Unit 1 Optics – reflection & refraction; Unit 2 Human eye"></textarea>
           </label>
+          <details class="upload-details">
+            <summary>Or upload the syllabus (PDF, photos or .txt)</summary>
+            <div id="sy-picker"></div>
+          </details>
         </section>
 
         <section class="card">
           <h2><span class="step">2</span> Marking scheme / answer key</h2>
           <p class="hint">Write the expected answer or key points for each question and how the marks are split. This matters most for accurate marks.</p>
-          <textarea name="scheme" rows="8" placeholder="Q1 (2 marks) Define refraction – bending of light when it passes from one medium to another (2)&#10;Q2 (5 marks) Ray diagram of convex lens – correct rays (2), labels (1), image position (1), nature of image (1)&#10;Q3 (3 marks) f = 20 cm, u = -30 cm → v = 60 cm. Formula (1), substitution (1), answer with unit (1)"></textarea>
+          <textarea name="scheme" rows="8" aria-label="Marking scheme" placeholder="Q1 (2 marks) Define refraction – bending of light when it passes from one medium to another (2)&#10;Q2 (5 marks) Ray diagram of convex lens – correct rays (2), labels (1), image position (1), nature of image (1)&#10;Q3 (3 marks) f = 20 cm, u = -30 cm → v = 60 cm. Formula (1), substitution (1), answer with unit (1)"></textarea>
+          <details class="upload-details">
+            <summary>Or upload the marking scheme (PDF, photos or .txt)</summary>
+            <div id="sc-picker"></div>
+          </details>
           <label>Anything else the checker should know <small class="muted">(optional)</small>
             <textarea name="extra" rows="2" placeholder="e.g. Part B: answer any 5 of 8. Internal choice in Q6."></textarea>
           </label>
@@ -75,11 +83,11 @@ function renderMarkPage() {
 
         <section class="card">
           <h2><span class="step">3</span> Question paper</h2>
-          <p class="hint">Type or paste the questions, or upload photos / a PDF of the question paper.
-            ${limited ? html`<strong>Typing is better:</strong> each marking can read only ${config.maxPages} pages in total, so typed questions leave every page for the answer sheet.` : ''}</p>
-          <textarea name="questionText" rows="5" placeholder="Q1. Define refraction. (2)&#10;Q2. Draw a ray diagram for a convex lens… (5)"></textarea>
-          <details id="qp-details">
-            <summary>Or upload question paper photos / PDF</summary>
+          <p class="hint">Type or paste the questions, or upload the question paper as a PDF, photos or a .txt file.
+            ${limited ? html`<strong>Tip:</strong> each marking can read ${config.maxPages} page images in total. Typed text and typed (non-scanned) PDFs don't count, because their text is copied into the box.` : ''}</p>
+          <textarea name="questionText" rows="5" aria-label="Questions" placeholder="Q1. Define refraction. (2)&#10;Q2. Draw a ray diagram for a convex lens… (5)"></textarea>
+          <details class="upload-details">
+            <summary>Or upload the question paper (PDF, photos or .txt)</summary>
             <div id="qp-picker"></div>
           </details>
         </section>
@@ -101,6 +109,10 @@ function renderMarkPage() {
             <label>Roll no.<input name="rollNo" autocomplete="off" placeholder="Optional" /></label>
           </div>
           <div id="as-picker"></div>
+          <details class="upload-details" id="answer-text-details">
+            <summary>Or type / paste the student's answers</summary>
+            <textarea name="answerText" rows="6" aria-label="Student's answers" placeholder="Q1. Refraction is the bending of light…&#10;Q2. …"></textarea>
+          </details>
         </section>
 
         <p class="form-error" role="alert" hidden></p>
@@ -116,27 +128,40 @@ function renderMarkPage() {
     <div id="help-page" hidden>${helpContent()}</div>`,
   );
 
+  // Text found in uploads (typed PDFs, .txt files) goes into the matching box for the teacher to check.
+  const addText = (field, open) => (text, name) => {
+    const box = form.elements[field];
+    box.value = box.value.trim() ? `${box.value.trim()}\n\n${text}` : text;
+    if (open) $(open).open = true;
+    toast(`Text from "${name}" was added to the box. Please check it.`, 'success');
+  };
+  const form = $('#mark-form');
+  const common = { maxSide: config.imageMaxSide, onChange: () => updateCount() };
   // Declared first: the pickers call updateCount() while they are being created.
-  let qpPicker = null;
-  let asPicker = null;
-  qpPicker = new PagePicker($('#qp-picker'), {
-    label: 'Add question paper pages',
-    hint: 'JPG, PNG or PDF. One photo per page.',
-    maxSide: config.imageMaxSide,
-    onChange: () => updateCount(),
+  const pickers = {};
+  pickers.syllabus = new PagePicker($('#sy-picker'), {
+    ...common, label: 'Add the syllabus', hint: 'PDF, photos or .txt.', extractText: true, onText: addText('syllabus'),
   });
-  asPicker = new PagePicker($('#as-picker'), {
+  pickers.scheme = new PagePicker($('#sc-picker'), {
+    ...common, label: 'Add the marking scheme', hint: 'PDF, photos or .txt.', extractText: true, onText: addText('scheme'),
+  });
+  pickers.question = new PagePicker($('#qp-picker'), {
+    ...common, label: 'Add the question paper', hint: 'PDF, photos (one per page) or .txt.', extractText: true, onText: addText('questionText'),
+  });
+  pickers.answer = new PagePicker($('#as-picker'), {
+    ...common,
     label: "Add the student's answer sheet",
-    hint: 'All pages, in order. Phone photos or a PDF.',
-    maxSide: config.imageMaxSide,
-    onChange: () => updateCount(),
+    hint: 'All pages, in order. Photos, a PDF or a .txt file.',
+    onText: addText('answerText', '#answer-text-details'),
   });
+  const imageCount = () => Object.values(pickers).reduce((n, p) => n + p.count(), 0);
 
   function updateCount() {
-    const total = (qpPicker?.count() || 0) + (asPicker?.count() || 0);
+    if (Object.keys(pickers).length < 4) return;
+    const total = imageCount();
     const over = total > config.maxPages;
     const el = $('#page-count');
-    el.textContent = total ? `${total} of ${config.maxPages} pages` : '';
+    el.textContent = total ? `${total} of ${config.maxPages} page images` : '';
     el.classList.toggle('over', over);
     $('#mark-btn').disabled = over;
     if (over) $('#mark-btn').textContent = `Too many pages (max ${config.maxPages})`;
@@ -144,7 +169,6 @@ function renderMarkPage() {
   }
   updateCount();
 
-  const form = $('#mark-form');
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const err = $('.form-error', form);
@@ -154,23 +178,28 @@ function renderMarkPage() {
       err.hidden = false;
       (focus || err).scrollIntoView({ behavior: 'smooth', block: 'center' });
     };
-    if (qpPicker.busy || asPicker.busy) return fail('Please wait for the pages to finish loading.');
-    if (!form.elements.questionText.value.trim() && !qpPicker.count()) {
-      return fail('Please add the question paper: type the questions or upload photos.', form.elements.questionText);
+    if (Object.values(pickers).some((p) => p.busy)) return fail('Please wait for the files to finish loading.');
+    const hasText = (name) => form.elements[name].value.trim().length > 0;
+    if (!hasText('questionText') && !pickers.question.count() && !hasText('scheme') && !pickers.scheme.count()) {
+      return fail('Please add the question paper (or a marking scheme that includes the questions).', form.elements.questionText);
     }
-    if (!asPicker.count()) return fail("Please add the student's answer sheet pages.", $('#answer-card'));
+    if (!hasText('answerText') && !pickers.answer.count()) {
+      return fail("Please add the student's answer sheet: photos, a PDF, or typed answers.", $('#answer-card'));
+    }
 
     const fd = new FormData();
-    for (const name of ['subject', 'className', 'totalMarks', 'syllabus', 'scheme', 'extra', 'questionText', 'instructions', 'studentName', 'rollNo']) {
+    for (const name of ['subject', 'className', 'totalMarks', 'syllabus', 'scheme', 'extra', 'questionText', 'instructions', 'answerText', 'studentName', 'rollNo']) {
       fd.append(name, form.elements[name].value);
     }
     fd.append('presets', JSON.stringify($$('input[name=preset]:checked', form).map((c) => c.value)));
-    qpPicker.appendTo(fd, 'questionPaper');
-    asPicker.appendTo(fd, 'answerSheet');
+    pickers.syllabus.appendTo(fd, 'syllabusFiles');
+    pickers.scheme.appendTo(fd, 'schemeFiles');
+    pickers.question.appendTo(fd, 'questionPaper');
+    pickers.answer.appendTo(fd, 'answerSheet');
 
     const btn = $('#mark-btn');
     setBusy(btn, true, 'Marking…');
-    const progress = showProgress(qpPicker.count(), asPicker.count());
+    const progress = showProgress(pickers.question.count(), pickers.answer.count());
     grading = true;
     try {
       const result = await api('/grade', { method: 'POST', form: fd });
@@ -193,7 +222,8 @@ function renderMarkPage() {
   view.addEventListener('click', async (e) => {
     const act = e.target.closest('[data-page-act]')?.dataset.pageAct;
     if (act === 'next') {
-      asPicker.clear();
+      pickers.answer.clear();
+      form.elements.answerText.value = '';
       form.elements.studentName.value = '';
       form.elements.rollNo.value = '';
       $('#result').hidden = true;
@@ -211,7 +241,7 @@ function renderMarkPage() {
 function showProgress(qpPages, asPages) {
   const steps = [
     qpPages ? 'Reading the question paper…' : 'Reading the questions…',
-    `Reading ${asPages} answer page${asPages > 1 ? 's' : ''}…`,
+    asPages ? `Reading ${asPages} answer page${asPages > 1 ? 's' : ''}…` : "Reading the student's answers…",
     'Matching answers to questions…',
     'Applying your marking scheme…',
     'Checking against your instructions…',
@@ -503,16 +533,17 @@ function helpContent() {
         <ul>
           <li><strong>Exam details</strong>: subject or paper, class or course (school, college or university) and <em>total marks</em>.</li>
           <li><strong>Marking scheme / answer key</strong>: the expected answer or key points for each question and how the marks are split. This matters most for accuracy.</li>
-          <li><strong>Question paper</strong>: type or paste the questions, or upload photos / a PDF.</li>
+          <li><strong>Question paper</strong>: the questions with their marks.</li>
+          <li>Each of these can be <strong>typed or pasted</strong>, or uploaded as a <strong>PDF, photos or a .txt file</strong>. If a PDF already contains typed text, the text is copied into the box so you can check it. Scanned PDFs and photos are read as page images. For Word files, save them as PDF or copy and paste the text.</li>
           <li><strong>Checking instructions</strong>: tap options like <em>Check liberally</em>, <em>Marks for diagram alone</em> or <em>Step marks</em>, and add your own.</li>
         </ul>
       </section>
       <section class="card">
         <h2>2. Add the answer sheet and calculate</h2>
         <ul>
-          <li>Add every page of the student's answer sheet in order: <strong>Choose files</strong> (photos or PDF) or <strong>Take photo</strong> on a phone. Use ‹ › to reorder and × to remove a page.</li>
+          <li>Add every page of the student's answer sheet in order: <strong>Choose files</strong> (photos, PDF or .txt) or <strong>Take photo</strong> on a phone. Use ‹ › to reorder and × to remove a page. For typed answers (e.g. an online test), use <em>Or type / paste the student's answers</em>.</li>
           <li>Click <strong>Calculate marks</strong>. It takes about 30–90 seconds.</li>
-          ${config.maxPages < 20 ? html`<li>Each marking can read up to <strong>${config.maxPages} pages</strong> in total (question paper + answer sheet). Typing the questions leaves more room for the answer sheet.</li>` : ''}
+          ${config.maxPages < 20 ? html`<li>Each marking can read up to <strong>${config.maxPages} page images</strong> in total, counting photos and scanned pages from every section. Typed text doesn't count, so typing the syllabus, scheme and questions leaves more room for the answer sheet.</li>` : ''}
         </ul>
       </section>
       <section class="card">

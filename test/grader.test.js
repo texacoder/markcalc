@@ -168,3 +168,23 @@ test('GitHub Models: uses gpt-4.1, falls back to JSON mode, reports daily limit'
   t.mock.method(globalThis, 'fetch', async () => new Response('{"error":{"code":"tokens_limit_reached"}}', { status: 413 }));
   await assert.rejects(grade(INPUT, env), /Too much to read/);
 });
+
+test('prompt includes typed answers and scheme/syllabus images in order', () => {
+  const img = (tag) => ({ mimetype: 'image/png', buffer: Buffer.from(tag) });
+  const [, user] = buildMessages({
+    setup: { answerText: 'Q1. Paris' },
+    syllabusFiles: [img('y')],
+    schemeFiles: [img('s')],
+    questionFiles: [img('q')],
+    answerFiles: [img('a')],
+  });
+  const titles = user.content.filter((p) => p.type === 'text').map((p) => p.text.split('\n')[0]);
+  assert.deepStrictEqual(titles.slice(1), [
+    '## Syllabus (1 page image(s), in order)',
+    '## Marking scheme / answer key (1 page image(s), in order)',
+    '## Question paper (1 page image(s), in order)',
+    "## Student's answers (typed)",
+    '## Student answer sheet (1 page image(s), in order)',
+  ]);
+  assert.strictEqual(user.content.filter((p) => p.type === 'image_url').length, 4);
+});

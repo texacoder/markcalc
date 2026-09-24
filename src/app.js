@@ -7,7 +7,7 @@ const helmet = require('helmet');
 const { grade, GradingError, providerName, maxPages } = require('./grader');
 
 const MAX_FILE_MB = 10;
-const SETUP_FIELDS = ['subject', 'className', 'totalMarks', 'syllabus', 'scheme', 'extra', 'questionText', 'instructions'];
+const SETUP_FIELDS = ['subject', 'className', 'totalMarks', 'syllabus', 'scheme', 'extra', 'questionText', 'instructions', 'answerText'];
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -144,6 +144,8 @@ function createApp({ env = process.env } = {}) {
   api.post(
     '/grade',
     upload.fields([
+      { name: 'syllabusFiles', maxCount: 10 },
+      { name: 'schemeFiles', maxCount: 15 },
       { name: 'questionPaper', maxCount: 15 },
       { name: 'answerSheet', maxCount: 30 },
     ]),
@@ -153,17 +155,24 @@ function createApp({ env = process.env } = {}) {
       const presets = parseJson(req.body?.presets, []);
       setup.presets = Array.isArray(presets) ? presets.map(String).slice(0, 20) : [];
 
-      const questionFiles = checkImages(req.files?.questionPaper || []);
-      const answerFiles = checkImages(req.files?.answerSheet || []);
-      if (!answerFiles.length) throw new HttpError(400, 'Please add the answer sheet pages.');
-      if (!questionFiles.length && !setup.questionText.trim()) {
-        throw new HttpError(400, 'Please add the question paper: upload photos or type the questions.');
+      const files = {
+        syllabusFiles: checkImages(req.files?.syllabusFiles || []),
+        schemeFiles: checkImages(req.files?.schemeFiles || []),
+        questionFiles: checkImages(req.files?.questionPaper || []),
+        answerFiles: checkImages(req.files?.answerSheet || []),
+      };
+      if (!files.answerFiles.length && !setup.answerText.trim()) {
+        throw new HttpError(400, "Please add the student's answer sheet: photos, a PDF, or typed answers.");
+      }
+      if (!files.questionFiles.length && !setup.questionText.trim() && !files.schemeFiles.length && !setup.scheme.trim()) {
+        throw new HttpError(400, 'Please add the question paper (or a marking scheme that includes the questions).');
       }
       const pageLimit = maxPages(env);
-      if (questionFiles.length + answerFiles.length > pageLimit) {
+      const pageCount = Object.values(files).reduce((n, list) => n + list.length, 0);
+      if (pageCount > pageLimit) {
         throw new HttpError(
           400,
-          `At most ${pageLimit} pages can be read at a time (question paper + answer sheet). You added ${questionFiles.length + answerFiles.length}. Remove some pages, or type the questions instead of uploading question-paper photos.`,
+          `At most ${pageLimit} page images can be read at a time. You added ${pageCount}. Remove some pages, or type the syllabus, scheme or questions instead of uploading photos.`,
         );
       }
 
@@ -179,7 +188,7 @@ function createApp({ env = process.env } = {}) {
 
       let result;
       try {
-        result = await limitSlots(() => grade({ setup, questionFiles, answerFiles }, env));
+        result = await limitSlots(() => grade({ setup, ...files }, env));
       } catch (err) {
         // A failed marking doesn't count towards the limits.
         usage.add(ipKey, -1);

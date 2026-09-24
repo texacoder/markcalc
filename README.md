@@ -9,6 +9,8 @@ The teacher or lecturer opens the site and enters:
 4. checking instructions such as *check liberally*, *marks for diagram alone* or *step marks*,
 5. the student's answer sheet (phone photos or a PDF).
 
+Every input can be **typed or pasted**, or uploaded as a **PDF, photos or a .txt file**. If a PDF already contains typed text, the text is copied into the box for checking, which saves page-image quota. Scanned PDFs and photos are read as images. Answer-sheet PDFs are always read as images, so handwriting and diagrams are kept.
+
 They click **Calculate marks** and get:
 - marks for every question, with what the student wrote and a short remark,
 - the total and percentage, plus feedback,
@@ -27,7 +29,7 @@ You only need a GitHub token (AI) and Render (website), both free. See **[docs/S
 ## Features
 
 - No accounts and no database: question papers, answer sheets and results are never saved on the server
-- Question paper and answer sheets as photos or PDFs (PDFs are split into pages in the browser; large photos are resized automatically)
+- Syllabus, marking scheme, question paper and answer sheet each accept typed text, PDFs, photos or .txt files (PDFs are processed in the browser; large photos are resized automatically)
 - "Take photo" button on phones; reorder and remove pages
 - 8 one-tap checking instructions, plus free-text instructions
 - Handles choice questions ("answer any 5"), step marks and half marks

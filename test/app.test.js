@@ -70,7 +70,7 @@ test('validates input', async () => {
     assert.strictEqual(res.status, 400);
     assert.match(res.body.error, /answer sheet/);
 
-    res = await post(s.base, gradeForm({ questionText: '' }));
+    res = await post(s.base, gradeForm({ questionText: '', extra: { scheme: '' } }));
     assert.strictEqual(res.status, 400);
     assert.match(res.body.error, /question paper/);
 
@@ -92,7 +92,7 @@ test('page limit counts question paper photos and is exposed in config', async (
     assert.strictEqual(cfg.maxPages, 3);
     const res = await post(s.base, gradeForm({ qp: 2, pages: 2 }));
     assert.strictEqual(res.status, 400);
-    assert.match(res.body.error, /At most 3 pages/);
+    assert.match(res.body.error, /At most 3 page images/);
     assert.strictEqual((await post(s.base, gradeForm({ qp: 1, pages: 2 }))).status, 200);
   } finally { s.close(); }
 });
@@ -128,5 +128,29 @@ test('failed markings do not use up the daily limit', async (t) => {
   try {
     assert.strictEqual((await post(s.base, gradeForm())).status, 502);
     assert.strictEqual((await post(s.base, gradeForm())).status, 502); // still allowed, not 429
+  } finally { s.close(); }
+});
+
+test('every input accepts typed text or images', async () => {
+  const s = await startServer({ MAX_PAGES: '4' });
+  try {
+    // Typed answers only, no answer-sheet images.
+    let res = await post(s.base, gradeForm({ pages: 0, extra: { answerText: 'Q1. Force is a push or pull.' } }));
+    assert.strictEqual(res.status, 200);
+
+    // Scheme and syllabus as images; no typed question paper (scheme stands in for it).
+    const fd = gradeForm({ questionText: '', pages: 1, extra: { scheme: '' } });
+    fd.append('schemeFiles', new Blob([png()], { type: 'image/png' }), 's.png');
+    fd.append('syllabusFiles', new Blob([png()], { type: 'image/png' }), 'y.png');
+    res = await post(s.base, fd);
+    assert.strictEqual(res.status, 200);
+
+    // All image kinds count towards the page limit.
+    const big = gradeForm({ qp: 1, pages: 2 });
+    big.append('schemeFiles', new Blob([png()], { type: 'image/png' }), 's.png');
+    big.append('syllabusFiles', new Blob([png()], { type: 'image/png' }), 'y.png');
+    res = await post(s.base, big);
+    assert.strictEqual(res.status, 400);
+    assert.match(res.body.error, /You added 5/);
   } finally { s.close(); }
 });

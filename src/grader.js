@@ -1,5 +1,5 @@
-// Grading engine. Talks to the OpenAI API from the server only;
-// the browser never sees the provider, the key, or the prompt.
+// Grading engine. Calls an AI vision model from the server only: Google Gemini (has a free tier)
+// or OpenAI. The browser never sees the provider, the key, or the prompt.
 
 const RESULT_SCHEMA = {
   type: 'object',
@@ -56,10 +56,7 @@ function textPart(text) {
 }
 
 function imageParts(files) {
-  return files.map((f) => ({
-    type: 'image_url',
-    image_url: { url: `data:${f.mimetype};base64,${Buffer.from(f.buffer).toString('base64')}`, detail: 'high' },
-  }));
+  return files.map((f) => ({ type: 'image', mimetype: f.mimetype, data: Buffer.from(f.buffer).toString('base64') }));
 }
 
 function section(title, body) {
@@ -74,7 +71,8 @@ function instructionText(setup) {
     .join('\n');
 }
 
-function buildMessages({ setup, questionFiles, answerFiles }) {
+// Provider-neutral list of text and image parts.
+function buildParts({ setup, questionFiles, answerFiles }) {
   const content = [
     textPart(
       [
@@ -96,11 +94,41 @@ function buildMessages({ setup, questionFiles, answerFiles }) {
 
   content.push(textPart(`## Student answer sheet (${answerFiles.length} page(s), in order)`));
   content.push(...imageParts(answerFiles));
+  return content;
+}
 
+// OpenAI chat format.
+function buildMessages(input) {
+  const content = buildParts(input).map((p) =>
+    p.type === 'text'
+      ? p
+      : { type: 'image_url', image_url: { url: `data:${p.mimetype};base64,${p.data}`, detail: 'high' } },
+  );
   return [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content },
   ];
+}
+
+// Gemini format.
+function buildGeminiContents(input) {
+  const parts = buildParts(input).map((p) =>
+    p.type === 'text' ? { text: p.text } : { inlineData: { mimeType: p.mimetype, data: p.data } },
+  );
+  return [{ role: 'user', parts }];
+}
+
+// Gemini's responseSchema is an OpenAPI subset: upper-case types, no additionalProperties.
+function toGeminiSchema(schema) {
+  const out = { type: String(schema.type).toUpperCase() };
+  if (schema.description) out.description = schema.description;
+  if (schema.properties) {
+    out.properties = Object.fromEntries(Object.entries(schema.properties).map(([k, v]) => [k, toGeminiSchema(v)]));
+    out.propertyOrdering = Object.keys(schema.properties);
+  }
+  if (schema.required) out.required = schema.required;
+  if (schema.items) out.items = toGeminiSchema(schema.items);
+  return out;
 }
 
 function round(n) {
@@ -173,40 +201,59 @@ class GradingError extends Error {
   }
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const BUSY = 'The marking service is busy right now. Please try again in a minute.';
+const FAILED = 'The marking service could not process this request. Please try again.';
+const UNREADABLE = 'This answer sheet could not be marked. Check that the photos are clear and try again.';
+
+function providerName(env) {
+  if (env.MOCK_GRADER === '1') return 'mock';
+  const chosen = String(env.AI_PROVIDER || '').toLowerCase();
+  if (chosen === 'gemini' || chosen === 'openai') return chosen;
+  if (env.GEMINI_API_KEY) return 'gemini';
+  if (env.OPENAI_API_KEY) return 'openai';
+  return 'none';
+}
+
+async function postJson(url, headers, body, env) {
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(Number(env.AI_TIMEOUT_MS || env.OPENAI_TIMEOUT_MS) || 240000),
+    });
+    const text = await res.text();
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch {}
+    return { status: res.status, ok: res.ok, json, text };
+  } catch (err) {
+    return { status: 0, ok: false, json: null, text: String(err) };
+  }
+}
+
+function parseResultText(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new GradingError('The marking result was incomplete. Please try again.');
+  }
+}
+
+// ---------------- OpenAI ----------------
+
 // Reasoning models (gpt-5*, o-series) reject a custom temperature.
 function isReasoningModel(model) {
   return /^(gpt-5|o\d)/i.test(model);
 }
 
-async function callOpenAI(body, env, attempt = 1) {
-  const res = await fetch(`${env.OPENAI_BASE_URL || 'https://api.openai.com/v1'}/chat/completions`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(Number(env.OPENAI_TIMEOUT_MS) || 240000),
-  }).catch((err) => ({ ok: false, status: 0, text: async () => String(err) }));
-
-  if (res.ok) return res.json();
-
-  const detail = await res.text().catch(() => '');
-  console.error(`Grading API error (attempt ${attempt})`, res.status, detail.slice(0, 800));
-  const retryable = res.status === 0 || res.status === 429 || res.status >= 500;
-  if (retryable && attempt < 3) {
-    await new Promise((r) => setTimeout(r, 2000 * attempt ** 2));
-    return callOpenAI(body, env, attempt + 1);
-  }
-  if (res.status === 429) throw new GradingError('The marking service is busy right now. Please try again in a minute.', 503);
-  throw new GradingError('The marking service could not process this request. Please try again.');
-}
-
-async function grade({ setup, questionFiles, answerFiles }, env = process.env) {
-  if (env.MOCK_GRADER === '1') return mockResult(setup);
-  if (!env.OPENAI_API_KEY) throw new GradingError('Marking is not configured on the server yet.', 503);
-
+async function gradeWithOpenAI(input, env) {
   const model = env.OPENAI_MODEL || 'gpt-4.1';
   const body = {
     model,
-    messages: buildMessages({ setup, questionFiles, answerFiles }),
+    messages: buildMessages(input),
     max_completion_tokens: isReasoningModel(model) ? 32000 : 8000,
     response_format: {
       type: 'json_schema',
@@ -215,18 +262,136 @@ async function grade({ setup, questionFiles, answerFiles }, env = process.env) {
   };
   if (!isReasoningModel(model)) body.temperature = 0;
 
-  const data = await callOpenAI(body, env);
-  const message = data.choices?.[0]?.message;
-  if (!message || message.refusal || !message.content) {
-    throw new GradingError('This answer sheet could not be marked. Check that the photos are clear and try again.', 422);
+  const url = `${env.OPENAI_BASE_URL || 'https://api.openai.com/v1'}/chat/completions`;
+  for (let attempt = 1; ; attempt++) {
+    const res = await postJson(url, { Authorization: `Bearer ${env.OPENAI_API_KEY}` }, body, env);
+    if (res.ok) {
+      const message = res.json?.choices?.[0]?.message;
+      if (!message || message.refusal || !message.content) throw new GradingError(UNREADABLE, 422);
+      return parseResultText(message.content);
+    }
+    console.error(`OpenAI error (attempt ${attempt})`, res.status, res.text.slice(0, 800));
+    const retryable = res.status === 0 || res.status === 429 || res.status >= 500;
+    if (retryable && attempt < 3) {
+      await sleep(2000 * attempt ** 2);
+      continue;
+    }
+    if (res.status === 429) throw new GradingError(BUSY, 503);
+    throw new GradingError(FAILED);
   }
-  let parsed;
-  try {
-    parsed = JSON.parse(message.content);
-  } catch {
-    throw new GradingError('The marking result was incomplete. Please try again.');
-  }
-  return normalize(parsed, setup.totalMarks);
 }
 
-module.exports = { grade, normalize, buildMessages, instructionText, GradingError, RESULT_SCHEMA };
+// ---------------- Gemini ----------------
+
+function geminiRetryDelayMs(json) {
+  const info = json?.error?.details?.find((d) => String(d['@type']).includes('RetryInfo'));
+  const seconds = parseFloat(info?.retryDelay);
+  return Number.isFinite(seconds) ? seconds * 1000 : null;
+}
+
+function geminiDailyQuotaHit(json) {
+  const failure = json?.error?.details?.find((d) => String(d['@type']).includes('QuotaFailure'));
+  return Boolean(failure?.violations?.some((v) => /PerDay/i.test(String(v.quotaId))));
+}
+
+async function gradeWithGemini(input, env) {
+  const models = [env.GEMINI_MODEL || 'gemini-flash-latest'];
+  if (!env.GEMINI_MODEL) models.push('gemini-2.5-flash'); // fallback if the alias is unavailable
+  const base = env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta';
+  const body = {
+    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: buildGeminiContents(input),
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: toGeminiSchema(RESULT_SCHEMA),
+      maxOutputTokens: 32768,
+    },
+  };
+
+  let modelIndex = 0;
+  for (let attempt = 1; ; attempt++) {
+    const model = models[modelIndex];
+    const res = await postJson(`${base}/models/${encodeURIComponent(model)}:generateContent`, { 'x-goog-api-key': env.GEMINI_API_KEY }, body, env);
+
+    if (res.ok) {
+      const candidate = res.json?.candidates?.[0];
+      if (res.json?.promptFeedback?.blockReason || !candidate) throw new GradingError(UNREADABLE, 422);
+      const text = (candidate.content?.parts || [])
+        .filter((p) => !p.thought && typeof p.text === 'string')
+        .map((p) => p.text)
+        .join('');
+      if (!text) throw new GradingError(UNREADABLE, 422);
+      if (candidate.finishReason === 'MAX_TOKENS') {
+        throw new GradingError('The answer sheet is too long to mark in one go. Try fewer pages.', 422);
+      }
+      return parseResultText(text);
+    }
+
+    console.error(`Gemini error (${model}, attempt ${attempt})`, res.status, res.text.slice(0, 800));
+    if (res.status === 404 && modelIndex < models.length - 1) {
+      modelIndex += 1;
+      continue;
+    }
+    if (res.status === 429 && geminiDailyQuotaHit(res.json)) {
+      throw new GradingError("Today's free marking limit has been reached. Please try again tomorrow.", 429);
+    }
+    const retryable = res.status === 0 || res.status === 429 || res.status >= 500;
+    if (retryable && attempt < 4) {
+      const wait = geminiRetryDelayMs(res.json) ?? 3000 * attempt ** 2;
+      await sleep(Math.min(wait + 500, 65000));
+      continue;
+    }
+    if (res.status === 429 || res.status === 503) throw new GradingError(BUSY, 503);
+    throw new GradingError(FAILED);
+  }
+}
+
+// Startup self-check so setup mistakes (bad key, unknown model) show up clearly in the server logs.
+async function checkProvider(env = process.env) {
+  const provider = providerName(env);
+  if (provider === 'mock') return { ok: true, message: 'Demo mode (MOCK_GRADER=1): fake marks, no AI calls.' };
+  if (provider === 'none') return { ok: false, message: 'No GEMINI_API_KEY or OPENAI_API_KEY set. Marking will not work.' };
+  const [url, headers, model] =
+    provider === 'gemini'
+      ? [
+          `${env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta'}/models/${env.GEMINI_MODEL || 'gemini-flash-latest'}`,
+          { 'x-goog-api-key': env.GEMINI_API_KEY },
+          env.GEMINI_MODEL || 'gemini-flash-latest',
+        ]
+      : [
+          `${env.OPENAI_BASE_URL || 'https://api.openai.com/v1'}/models/${env.OPENAI_MODEL || 'gpt-4.1'}`,
+          { Authorization: `Bearer ${env.OPENAI_API_KEY}` },
+          env.OPENAI_MODEL || 'gpt-4.1',
+        ];
+  try {
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(15000) });
+    if (res.ok) return { ok: true, message: `${provider} key OK, model "${model}" available.` };
+    const text = (await res.text()).slice(0, 300).replace(/\s+/g, ' ');
+    return { ok: false, message: `${provider} check failed (HTTP ${res.status}) for model "${model}": ${text}` };
+  } catch (err) {
+    return { ok: false, message: `${provider} check could not connect: ${err.message}` };
+  }
+}
+
+async function grade(input, env = process.env) {
+  const provider = providerName(env);
+  if (provider === 'mock') return mockResult(input.setup);
+  let raw;
+  if (provider === 'gemini' && env.GEMINI_API_KEY) raw = await gradeWithGemini(input, env);
+  else if (provider === 'openai' && env.OPENAI_API_KEY) raw = await gradeWithOpenAI(input, env);
+  else throw new GradingError('Marking is not configured on the server yet.', 503);
+  return normalize(raw, input.setup.totalMarks);
+}
+
+module.exports = {
+  grade,
+  normalize,
+  buildMessages,
+  buildGeminiContents,
+  toGeminiSchema,
+  instructionText,
+  providerName,
+  checkProvider,
+  GradingError,
+  RESULT_SCHEMA,
+};

@@ -2,9 +2,8 @@ const path = require('path');
 const express = require('express');
 const multer = require('multer');
 const helmet = require('helmet');
-const { tx } = require('./db');
 const auth = require('./auth');
-const { grade, normalize, GradingError } = require('./grader');
+const { grade, normalize, GradingError, providerName } = require('./grader');
 
 const { HttpError } = auth;
 const MAX_FILE_MB = 10;
@@ -60,6 +59,8 @@ function createApp({ db, env = process.env }) {
   const app = express();
   const secureCookies = env.NODE_ENV === 'production';
   const dailyLimit = Number(env.DAILY_GRADING_LIMIT) || 60;
+  // Optional cap for the whole website per day (e.g. to stay inside a free AI quota).
+  const siteDailyLimit = Number(env.SITE_DAILY_LIMIT) || 0;
   const signupCode = (env.SIGNUP_CODE || '').trim();
   const loginLimiter = auth.rateLimiter({ windowMs: 15 * 60 * 1000, max: 20 });
   const signupLimiter = auth.rateLimiter({ windowMs: 60 * 60 * 1000, max: 10 });
@@ -85,7 +86,7 @@ function createApp({ db, env = process.env }) {
     }),
   );
 
-  app.get('/healthz', (req, res) => res.json({ ok: true }));
+  app.get('/healthz', (req, res) => res.json({ ok: true, markingConfigured: providerName(env) !== 'none' }));
   app.use(express.static(path.join(__dirname, '..', 'public'), { maxAge: '1h' }));
   app.use('/vendor/pdfjs', express.static(path.join(path.dirname(require.resolve('pdfjs-dist/package.json')), 'legacy', 'build'), { maxAge: '7d' }));
 
@@ -101,23 +102,24 @@ function createApp({ db, env = process.env }) {
     next(new HttpError(403, 'Request blocked.'));
   });
 
-  api.use((req, res, next) => {
-    req.user = auth.sessionUser(db, req);
+  api.use(async (req, res, next) => {
+    req.user = await auth.sessionUser(db, req);
     next();
   });
 
   const requireUser = (req, res, next) => (req.user ? next() : next(new HttpError(401, 'Please log in.')));
 
-  const usageToday = (userId) =>
-    db.prepare('SELECT count FROM usage WHERE user_id = ? AND day = ?').get(userId, today())?.count || 0;
+  const usageToday = async (userId) =>
+    (await db.get('SELECT count FROM usage WHERE user_id = ? AND day = ?', userId, today()))?.count || 0;
+  const siteUsageToday = async () => (await db.get('SELECT count FROM site_usage WHERE day = ?', today()))?.count || 0;
 
   // ---------- Auth ----------
   api.get('/config', (req, res) => res.json({ signupCodeRequired: Boolean(signupCode) }));
 
-  api.get('/me', (req, res) => {
+  api.get('/me', async (req, res) => {
     if (!req.user) return res.json({ user: null });
     const { id, name, email } = req.user;
-    res.json({ user: { id, name, email }, usage: { today: usageToday(id), limit: dailyLimit } });
+    res.json({ user: { id, name, email }, usage: { today: await usageToday(id), limit: dailyLimit } });
   });
 
   api.post('/auth/signup', async (req, res) => {
@@ -126,61 +128,59 @@ function createApp({ db, env = process.env }) {
     auth.validateSignup({ name, email, password });
     if (signupCode && String(code || '').trim() !== signupCode) throw new HttpError(403, 'The school access code is not correct.');
     const normalized = auth.normalizeEmail(email);
-    if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(normalized)) {
+    if (await db.get('SELECT 1 AS x FROM users WHERE email = ?', normalized)) {
       throw new HttpError(409, 'An account with this email already exists. Please log in.');
     }
     const hash = await auth.hashPassword(password);
-    const { lastInsertRowid } = db
-      .prepare('INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)')
-      .run(String(name).trim().slice(0, 100), normalized, hash);
-    auth.setSessionCookie(res, auth.createSession(db, Number(lastInsertRowid)), secureCookies);
+    const { lastInsertRowid } = await db.run(
+      'INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)',
+      String(name).trim().slice(0, 100),
+      normalized,
+      hash,
+    );
+    auth.setSessionCookie(res, await auth.createSession(db, lastInsertRowid), secureCookies);
     res.status(201).json({ ok: true });
   });
 
   api.post('/auth/login', async (req, res) => {
     if (!loginLimiter(req.ip)) throw new HttpError(429, 'Too many login attempts. Please wait 15 minutes.');
     const { email, password } = req.body || {};
-    const user = db.prepare('SELECT id, password_hash FROM users WHERE email = ?').get(auth.normalizeEmail(email));
+    const user = await db.get('SELECT id, password_hash FROM users WHERE email = ?', auth.normalizeEmail(email));
     if (!user || !(await auth.verifyPassword(String(password || ''), user.password_hash))) {
       throw new HttpError(401, 'Email or password is incorrect.');
     }
-    auth.setSessionCookie(res, auth.createSession(db, user.id), secureCookies);
+    auth.setSessionCookie(res, await auth.createSession(db, user.id), secureCookies);
     res.json({ ok: true });
   });
 
-  api.post('/auth/logout', (req, res) => {
-    auth.destroySession(db, req.user?.token);
+  api.post('/auth/logout', async (req, res) => {
+    await auth.destroySession(db, req.user?.token);
     auth.clearSessionCookie(res, secureCookies);
     res.json({ ok: true });
   });
 
   api.post('/auth/password', requireUser, async (req, res) => {
     const { current, next: newPassword } = req.body || {};
-    const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id);
+    const row = await db.get('SELECT password_hash FROM users WHERE id = ?', req.user.id);
     if (!(await auth.verifyPassword(String(current || ''), row.password_hash))) throw new HttpError(400, 'Current password is incorrect.');
     if (String(newPassword || '').length < 8) throw new HttpError(400, 'New password must be at least 8 characters.');
     const hash = await auth.hashPassword(newPassword);
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, req.user.id);
-    db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(
-      req.user.id,
-      require('crypto').createHash('sha256').update(req.user.token).digest('hex'),
-    );
+    await db.run('UPDATE users SET password_hash = ? WHERE id = ?', hash, req.user.id);
+    await db.run('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?', req.user.id, auth.sha256(req.user.token));
     res.json({ ok: true });
   });
 
   // ---------- Exams ----------
-  const getExam = (req) => {
-    const exam = db.prepare('SELECT * FROM exams WHERE id = ? AND user_id = ?').get(Number(req.params.id), req.user.id);
+  const getExam = async (req) => {
+    const exam = await db.get('SELECT * FROM exams WHERE id = ? AND user_id = ?', Number(req.params.id) || 0, req.user.id);
     if (!exam) throw new HttpError(404, 'Exam not found.');
     return exam;
   };
 
-  const examFiles = (examId, withData = false) =>
-    db
-      .prepare(`SELECT id, mimetype${withData ? ', data' : ''} FROM exam_files WHERE exam_id = ? ORDER BY position`)
-      .all(examId);
+  const examFiles = (examId, withData = false, conn = db) =>
+    conn.all(`SELECT id, mimetype${withData ? ', data' : ''} FROM exam_files WHERE exam_id = ? ORDER BY position`, examId);
 
-  const serializeExam = (e) => ({
+  const serializeExam = async (e) => ({
     id: e.id,
     title: e.title,
     subject: e.subject,
@@ -194,7 +194,7 @@ function createApp({ db, env = process.env }) {
     instructions: e.instructions,
     createdAt: e.created_at,
     updatedAt: e.updated_at,
-    files: examFiles(e.id).map((f) => f.id),
+    files: (await examFiles(e.id)).map((f) => f.id),
   });
 
   const examValues = (body) => {
@@ -206,29 +206,33 @@ function createApp({ db, env = process.env }) {
     return values;
   };
 
-  const saveFiles = (examId, keepIds, newFiles) => {
-    const current = examFiles(examId).map((f) => f.id);
-    const keep = keepIds.filter((id) => current.includes(id));
-    for (const id of current) if (!keep.includes(id)) db.prepare('DELETE FROM exam_files WHERE id = ?').run(id);
-    keep.forEach((id, i) => db.prepare('UPDATE exam_files SET position = ? WHERE id = ?').run(i, id));
-    newFiles.forEach((f, i) =>
-      db
-        .prepare('INSERT INTO exam_files (exam_id, position, mimetype, data) VALUES (?, ?, ?, ?)')
-        .run(examId, keep.length + i, f.mimetype, f.buffer),
-    );
+  const saveFiles = async (t, examId, keepIds, newFiles) => {
+    const current = (await examFiles(examId, false, t)).map((f) => f.id);
+    const keep = [...new Set(keepIds)].filter((id) => current.includes(id));
+    for (const id of current) if (!keep.includes(id)) await t.run('DELETE FROM exam_files WHERE id = ?', id);
+    for (const [i, id] of keep.entries()) await t.run('UPDATE exam_files SET position = ? WHERE id = ?', i, id);
+    for (const [i, f] of newFiles.entries()) {
+      await t.run(
+        'INSERT INTO exam_files (exam_id, position, mimetype, data) VALUES (?, ?, ?, ?)',
+        examId,
+        keep.length + i,
+        f.mimetype,
+        f.buffer,
+      );
+    }
   };
+  const loadExam = async (id) => serializeExam(await db.get('SELECT * FROM exams WHERE id = ?', id));
 
   const questionUpload = upload.fields([{ name: 'questionPaper', maxCount: 15 }]);
 
-  api.get('/exams', requireUser, (req, res) => {
-    const rows = db
-      .prepare(
-        `SELECT e.id, e.title, e.subject, e.class_name, e.total_marks, e.updated_at,
+  api.get('/exams', requireUser, async (req, res) => {
+    const rows = await db.all(
+      `SELECT e.id, e.title, e.subject, e.class_name, e.total_marks, e.updated_at,
                 COUNT(r.id) AS result_count, AVG(r.total_awarded * 100.0 / NULLIF(r.total_maximum, 0)) AS avg_pct
          FROM exams e LEFT JOIN results r ON r.exam_id = e.id
-         WHERE e.user_id = ? GROUP BY e.id ORDER BY e.updated_at DESC`,
-      )
-      .all(req.user.id);
+         WHERE e.user_id = ? GROUP BY e.id ORDER BY e.updated_at DESC, e.id DESC`,
+      req.user.id,
+    );
     res.json(
       rows.map((r) => ({
         id: r.id,
@@ -243,46 +247,55 @@ function createApp({ db, env = process.env }) {
     );
   });
 
-  api.post('/exams', requireUser, questionUpload, (req, res) => {
+  api.post('/exams', requireUser, questionUpload, async (req, res) => {
     const values = examValues(req.body);
     const files = checkImages(req.files?.questionPaper || []);
-    const id = tx(db, () => {
+    const id = await db.tx(async (t) => {
       const cols = Object.keys(values);
-      const { lastInsertRowid } = db
-        .prepare(`INSERT INTO exams (user_id, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`)
-        .run(req.user.id, ...Object.values(values));
-      saveFiles(Number(lastInsertRowid), [], files);
-      return Number(lastInsertRowid);
+      const { lastInsertRowid } = await t.run(
+        `INSERT INTO exams (user_id, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`,
+        req.user.id,
+        ...Object.values(values),
+      );
+      await saveFiles(t, lastInsertRowid, [], files);
+      return lastInsertRowid;
     });
-    res.status(201).json(serializeExam(db.prepare('SELECT * FROM exams WHERE id = ?').get(id)));
+    res.status(201).json(await loadExam(id));
   });
 
-  api.get('/exams/:id', requireUser, (req, res) => res.json(serializeExam(getExam(req))));
+  api.get('/exams/:id', requireUser, async (req, res) => res.json(await serializeExam(await getExam(req))));
 
-  api.put('/exams/:id', requireUser, questionUpload, (req, res) => {
-    const exam = getExam(req);
+  api.put('/exams/:id', requireUser, questionUpload, async (req, res) => {
+    const exam = await getExam(req);
     const values = examValues(req.body);
     const files = checkImages(req.files?.questionPaper || []);
-    const keep = parseJson(req.body?.keepFiles, []).map(Number);
-    tx(db, () => {
+    const keepList = parseJson(req.body?.keepFiles, []);
+    const keep = (Array.isArray(keepList) ? keepList : []).map(Number);
+    await db.tx(async (t) => {
       const sets = Object.keys(values).map((c) => `${c} = ?`);
-      db.prepare(`UPDATE exams SET ${sets.join(', ')}, updated_at = datetime('now') WHERE id = ?`).run(...Object.values(values), exam.id);
-      saveFiles(exam.id, keep, files);
+      await t.run(`UPDATE exams SET ${sets.join(', ')}, updated_at = datetime('now') WHERE id = ?`, ...Object.values(values), exam.id);
+      await saveFiles(t, exam.id, keep, files);
     });
-    res.json(serializeExam(db.prepare('SELECT * FROM exams WHERE id = ?').get(exam.id)));
+    res.json(await loadExam(exam.id));
   });
 
-  api.delete('/exams/:id', requireUser, (req, res) => {
-    const exam = getExam(req);
-    db.prepare('DELETE FROM exams WHERE id = ?').run(exam.id);
+  api.delete('/exams/:id', requireUser, async (req, res) => {
+    const exam = await getExam(req);
+    await db.tx(async (t) => {
+      await t.run('DELETE FROM exam_files WHERE exam_id = ?', exam.id);
+      await t.run('DELETE FROM results WHERE exam_id = ?', exam.id);
+      await t.run('DELETE FROM exams WHERE id = ?', exam.id);
+    });
     res.json({ ok: true });
   });
 
-  api.get('/exams/:id/files/:fileId', requireUser, (req, res) => {
-    const exam = getExam(req);
-    const file = db
-      .prepare('SELECT mimetype, data FROM exam_files WHERE id = ? AND exam_id = ?')
-      .get(Number(req.params.fileId), exam.id);
+  api.get('/exams/:id/files/:fileId', requireUser, async (req, res) => {
+    const exam = await getExam(req);
+    const file = await db.get(
+      'SELECT mimetype, data FROM exam_files WHERE id = ? AND exam_id = ?',
+      Number(req.params.fileId) || 0,
+      exam.id,
+    );
     if (!file) throw new HttpError(404, 'File not found.');
     res.set('Cache-Control', 'private, max-age=86400').type(file.mimetype).send(Buffer.from(file.data));
   });
@@ -300,13 +313,10 @@ function createApp({ db, env = process.env }) {
     ...parseJson(r.data, {}),
   });
 
-  const saveResultRow = (id, result, edited) =>
-    db
-      .prepare(
-        `UPDATE results SET student_name = ?, roll_no = ?, total_awarded = ?, total_maximum = ?, data = ?, edited = ? WHERE id = ?`,
-      )
-      .run(
-        result.studentName,
+  const saveResultRow = (conn, id, result, edited) =>
+    conn.run(
+      `UPDATE results SET student_name = ?, roll_no = ?, total_awarded = ?, total_maximum = ?, data = ?, edited = ? WHERE id = ?`,
+      result.studentName,
         result.rollNo,
         result.totalAwarded,
         result.totalMaximum,
@@ -316,22 +326,25 @@ function createApp({ db, env = process.env }) {
           overallFeedback: result.overallFeedback,
           warnings: result.warnings,
         }),
-        edited ? 1 : 0,
-        id,
-      );
+      edited ? 1 : 0,
+      id,
+    );
 
   const answerUpload = upload.fields([{ name: 'answerSheet', maxCount: 30 }]);
 
   api.post('/exams/:id/grade', requireUser, answerUpload, async (req, res) => {
-    const exam = serializeExam(getExam(req));
+    const exam = await serializeExam(await getExam(req));
     const answerFiles = checkImages(req.files?.answerSheet || []);
     if (!answerFiles.length) throw new HttpError(400, 'Please upload at least one answer sheet page.');
-    const questionFiles = examFiles(exam.id, true).map((f) => ({ mimetype: f.mimetype, buffer: f.data }));
+    const questionFiles = (await examFiles(exam.id, true)).map((f) => ({ mimetype: f.mimetype, buffer: Buffer.from(f.data) }));
     if (!questionFiles.length && !exam.questionText.trim()) {
       throw new HttpError(400, 'This exam has no question paper yet. Edit the exam and add it first.');
     }
-    if (usageToday(req.user.id) >= dailyLimit) {
+    if ((await usageToday(req.user.id)) >= dailyLimit) {
       throw new HttpError(429, `You have reached today's limit of ${dailyLimit} answer sheets. It resets at midnight (UTC).`);
+    }
+    if (siteDailyLimit && (await siteUsageToday()) >= siteDailyLimit) {
+      throw new HttpError(429, "Today's marking limit for this website has been reached. Please try again tomorrow.");
     }
 
     const result = await grade({ setup: exam, questionFiles, answerFiles }, env);
@@ -340,37 +353,47 @@ function createApp({ db, env = process.env }) {
     if (studentName) result.studentName = studentName;
     if (rollNo) result.rollNo = rollNo;
 
-    const id = tx(db, () => {
-      const { lastInsertRowid } = db
-        .prepare('INSERT INTO results (exam_id, total_awarded, total_maximum, data) VALUES (?, 0, 0, ?)')
-        .run(exam.id, '{}');
-      saveResultRow(Number(lastInsertRowid), result, false);
-      db.prepare(
+    const id = await db.tx(async (t) => {
+      const { lastInsertRowid } = await t.run(
+        'INSERT INTO results (exam_id, total_awarded, total_maximum, data) VALUES (?, 0, 0, ?)',
+        exam.id,
+        '{}',
+      );
+      await saveResultRow(t, lastInsertRowid, result, false);
+      await t.run(
         `INSERT INTO usage (user_id, day, count) VALUES (?, ?, 1)
          ON CONFLICT(user_id, day) DO UPDATE SET count = count + 1`,
-      ).run(req.user.id, today());
-      return Number(lastInsertRowid);
+        req.user.id,
+        today(),
+      );
+      await t.run(
+        `INSERT INTO site_usage (day, count) VALUES (?, 1) ON CONFLICT(day) DO UPDATE SET count = count + 1`,
+        today(),
+      );
+      return lastInsertRowid;
     });
-    res.status(201).json(serializeResult(db.prepare('SELECT * FROM results WHERE id = ?').get(id)));
+    res.status(201).json(serializeResult(await db.get('SELECT * FROM results WHERE id = ?', id)));
   });
 
-  api.get('/exams/:id/results', requireUser, (req, res) => {
-    const exam = getExam(req);
-    const rows = db.prepare('SELECT * FROM results WHERE exam_id = ? ORDER BY created_at DESC, id DESC').all(exam.id);
+  api.get('/exams/:id/results', requireUser, async (req, res) => {
+    const exam = await getExam(req);
+    const rows = await db.all('SELECT * FROM results WHERE exam_id = ? ORDER BY created_at DESC, id DESC', exam.id);
     res.json(rows.map(serializeResult));
   });
 
-  const getResult = (req) => {
-    const row = db
-      .prepare('SELECT r.* FROM results r JOIN exams e ON e.id = r.exam_id WHERE r.id = ? AND e.user_id = ?')
-      .get(Number(req.params.id), req.user.id);
+  const getResult = async (req) => {
+    const row = await db.get(
+      'SELECT r.* FROM results r JOIN exams e ON e.id = r.exam_id WHERE r.id = ? AND e.user_id = ?',
+      Number(req.params.id) || 0,
+      req.user.id,
+    );
     if (!row) throw new HttpError(404, 'Result not found.');
     return row;
   };
 
   // Teacher corrections: change marks per question, student name or roll number.
-  api.patch('/results/:id', requireUser, (req, res) => {
-    const row = getResult(req);
+  api.patch('/results/:id', requireUser, async (req, res) => {
+    const row = await getResult(req);
     const current = serializeResult(row);
     const edits = Array.isArray(req.body?.questions) ? req.body.questions : [];
     const questions = current.questions.map((q, i) => ({
@@ -379,7 +402,7 @@ function createApp({ db, env = process.env }) {
       counted: edits[i]?.counted ?? q.counted,
       comment: edits[i]?.comment ?? q.comment,
     }));
-    const exam = db.prepare('SELECT total_marks FROM exams WHERE id = ?').get(row.exam_id);
+    const exam = await db.get('SELECT total_marks FROM exams WHERE id = ?', row.exam_id);
     const updated = normalize(
       {
         ...current,
@@ -390,22 +413,25 @@ function createApp({ db, env = process.env }) {
       },
       exam.total_marks || current.totalMaximum,
     );
-    saveResultRow(row.id, updated, true);
-    res.json(serializeResult(db.prepare('SELECT * FROM results WHERE id = ?').get(row.id)));
+    await saveResultRow(db, row.id, updated, true);
+    res.json(serializeResult(await db.get('SELECT * FROM results WHERE id = ?', row.id)));
   });
 
-  api.delete('/results/:id', requireUser, (req, res) => {
-    const row = getResult(req);
-    db.prepare('DELETE FROM results WHERE id = ?').run(row.id);
+  api.delete('/results/:id', requireUser, async (req, res) => {
+    const row = await getResult(req);
+    await db.run('DELETE FROM results WHERE id = ?', row.id);
     res.json({ ok: true });
   });
 
-  api.get('/exams/:id/results.csv', requireUser, (req, res) => {
-    const exam = getExam(req);
-    const results = db
-      .prepare('SELECT * FROM results WHERE exam_id = ? ORDER BY roll_no, student_name, id')
-      .all(exam.id)
-      .map(serializeResult);
+  api.get('/exams/:id/results.csv', requireUser, async (req, res) => {
+    const exam = await getExam(req);
+    const results = (await db.all('SELECT * FROM results WHERE exam_id = ? ORDER BY id', exam.id))
+      .map(serializeResult)
+      .sort(
+        (a, b) =>
+          String(a.rollNo).localeCompare(String(b.rollNo), undefined, { numeric: true }) ||
+          String(a.studentName).localeCompare(String(b.studentName)),
+      );
     const labels = [];
     for (const r of results) for (const q of r.questions || []) if (!labels.includes(q.question)) labels.push(q.question);
     const lines = [['Roll No', 'Student', ...labels.map((l) => `Q${l}`), 'Total', 'Out of', 'Percentage'].map(csvCell).join(',')];

@@ -60,3 +60,80 @@ test('grade calls the API with a strict schema and retries on 5xx', async (t) =>
   assert.strictEqual(r.totalAwarded, 4);
   assert.strictEqual(r.studentName, 'Ravi');
 });
+
+const { toGeminiSchema, RESULT_SCHEMA, providerName } = require('../src/grader');
+
+const GOOD = {
+  studentName: 'Meena', rollNo: '3', totalMaximum: 10, overallFeedback: 'Good', warnings: [],
+  questions: [{ question: '1', studentAnswer: 'x', awarded: 6, maximum: 10, counted: true, comment: 'ok' }],
+};
+const INPUT = { setup: { totalMarks: '10' }, questionFiles: [], answerFiles: [{ mimetype: 'image/jpeg', buffer: Buffer.from('img') }] };
+const geminiOk = (obj) =>
+  Response.json({ candidates: [{ finishReason: 'STOP', content: { parts: [{ thought: true, text: 'thinking…' }, { text: JSON.stringify(obj) }] } }] });
+
+test('provider selection prefers explicit choice, then Gemini, then OpenAI', () => {
+  assert.strictEqual(providerName({ GEMINI_API_KEY: 'g', OPENAI_API_KEY: 'o' }), 'gemini');
+  assert.strictEqual(providerName({ OPENAI_API_KEY: 'o' }), 'openai');
+  assert.strictEqual(providerName({ AI_PROVIDER: 'openai', GEMINI_API_KEY: 'g', OPENAI_API_KEY: 'o' }), 'openai');
+  assert.strictEqual(providerName({}), 'none');
+});
+
+test('Gemini schema has no additionalProperties and keeps order', () => {
+  const g = toGeminiSchema(RESULT_SCHEMA);
+  assert.ok(!JSON.stringify(g).includes('additionalProperties'));
+  assert.strictEqual(g.type, 'OBJECT');
+  assert.strictEqual(g.properties.questions.items.properties.counted.type, 'BOOLEAN');
+  assert.deepStrictEqual(g.propertyOrdering, Object.keys(RESULT_SCHEMA.properties));
+});
+
+test('grade with Gemini sends images inline and ignores thought parts', async (t) => {
+  let call;
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    call = { url, init, body: JSON.parse(init.body) };
+    return geminiOk(GOOD);
+  });
+  const r = await grade(INPUT, { GEMINI_API_KEY: 'gkey' });
+  assert.match(call.url, /models\/gemini-flash-latest:generateContent$/);
+  assert.strictEqual(call.init.headers['x-goog-api-key'], 'gkey');
+  assert.strictEqual(call.body.generationConfig.responseMimeType, 'application/json');
+  const parts = call.body.contents[0].parts;
+  assert.deepStrictEqual(parts.at(-1), { inlineData: { mimeType: 'image/jpeg', data: Buffer.from('img').toString('base64') } });
+  assert.match(call.body.systemInstruction.parts[0].text, /examiner/);
+  assert.strictEqual(r.totalAwarded, 6);
+  assert.strictEqual(r.studentName, 'Meena');
+});
+
+test('Gemini: waits and retries on per-minute limit, falls back when model is missing', async (t) => {
+  const urls = [];
+  const replies = [
+    Response.json({ error: { code: 404, message: 'model not found' } }, { status: 404 }),
+    Response.json({ error: { code: 429, details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '1s' }] } }, { status: 429 }),
+    geminiOk(GOOD),
+  ];
+  const waits = [];
+  t.mock.method(globalThis, 'fetch', async (url) => { urls.push(url); return replies.shift(); });
+  t.mock.method(globalThis, 'setTimeout', (fn, ms) => { waits.push(ms); fn(); return 0; });
+  t.mock.method(console, 'error', () => {});
+  const r = await grade(INPUT, { GEMINI_API_KEY: 'g' });
+  assert.strictEqual(r.totalAwarded, 6);
+  assert.match(urls[1], /gemini-2\.5-flash/);
+  assert.ok(waits.includes(1500));
+});
+
+test('Gemini: daily free quota gives a clear message without retrying', async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    return Response.json(
+      { error: { code: 429, details: [{ '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{ quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier' }] }] } },
+      { status: 429 },
+    );
+  });
+  t.mock.method(console, 'error', () => {});
+  await assert.rejects(grade(INPUT, { GEMINI_API_KEY: 'g', GEMINI_MODEL: 'gemini-2.5-flash' }), (err) => {
+    assert.strictEqual(err.status, 429);
+    assert.match(err.message, /free marking limit/);
+    return true;
+  });
+  assert.strictEqual(calls, 1);
+});

@@ -21,6 +21,7 @@
   },
   "homepage": "https://github.com/texacoder/markcalc#readme",
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "dotenv": "^18.0.3",
     "express": "^5.2.1",
     "helmet": "^8.3.0",
@@ -29,6 +30,6 @@
   },
   "private": true,
   "engines": {
-    "node": ">=22.13"
+    "node": ">=20"
   }
 }

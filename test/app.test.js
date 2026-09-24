@@ -21,7 +21,7 @@ function png() {
 }
 
 async function startServer(env = {}) {
-  const db = openDb(':memory:');
+  const db = await openDb({ url: ':memory:' });
   const server = createApp({ db, env: { MOCK_GRADER: '1', ...env } }).listen(0);
   await new Promise((r) => server.once('listening', r));
   const base = `http://localhost:${server.address().port}`;
@@ -174,5 +174,21 @@ test('exam without question paper cannot be graded', async () => {
     const exam = (await call('/api/exams', { method: 'POST', form: examForm({}, 0) })).body;
     const res = await call(`/api/exams/${exam.id}/grade`, { method: 'POST', form: sheetForm() });
     assert.strictEqual(res.status, 400);
+  } finally { s.close(); }
+});
+
+test('site-wide daily limit applies across teachers', async () => {
+  const s = await startServer({ SITE_DAILY_LIMIT: '1' });
+  try {
+    const a = client(s.base);
+    const b = client(s.base);
+    await signup(a, 'a@x.com');
+    await signup(b, 'b@x.com');
+    const ea = (await a('/api/exams', { method: 'POST', form: examForm() })).body;
+    const eb = (await b('/api/exams', { method: 'POST', form: examForm() })).body;
+    assert.strictEqual((await a(`/api/exams/${ea.id}/grade`, { method: 'POST', form: sheetForm() })).status, 201);
+    const res = await b(`/api/exams/${eb.id}/grade`, { method: 'POST', form: sheetForm() });
+    assert.strictEqual(res.status, 429);
+    assert.match(res.body.error, /website/);
   } finally { s.close(); }
 });

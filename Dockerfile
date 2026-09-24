@@ -1,6 +1,6 @@
 FROM node:22-slim
 ENV NODE_ENV=production \
-    DATABASE_FILE=/data/markcalc.db \
+    DATABASE_URL=file:/data/markcalc.db \
     PORT=3000
 WORKDIR /app
 COPY package.json package-lock.json ./

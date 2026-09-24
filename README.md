@@ -10,9 +10,13 @@ A teacher sets up an exam once: syllabus, marking scheme or answer key, question
 
 Teachers can correct any mark; the total updates automatically.
 
-Marking is done by OpenAI's API (ChatGPT models) **on the server**. Teachers never see the provider, the key or the prompt.
+Marking is done by an AI vision model **on the server**: Google Gemini (free tier) by default, or OpenAI's ChatGPT models. Teachers never see the provider, the key or the prompt.
 
-**→ To put it online, follow [docs/SETUP.md](docs/SETUP.md).**
+## Put it online for free
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/texacoder/markcalc)
+
+Everything runs on free plans: Gemini API (AI), Turso (database) and Render (website). Follow **[docs/SETUP.md](docs/SETUP.md)**. It takes about 15 minutes and no credit card.
 
 ## Features
 
@@ -23,19 +27,21 @@ Marking is done by OpenAI's API (ChatGPT models) **on the server**. Teachers nev
 - 8 one-tap checking instructions, plus free-text instructions
 - Handles choice questions ("answer any 5"), step marks and half marks
 - Mark correction, printing, and a CSV export for the register
-- Cost controls: optional signup code and a per-teacher daily limit
+- Cost/quota controls: optional signup code, per-teacher and site-wide daily limits, friendly messages when the free AI quota runs out
 - Security: hashed passwords, HttpOnly session cookies, rate-limited login, CSP headers, uploads checked by file content
 - Works on phones, tablets and computers, in light and dark mode
 
 ## Run it on your computer
 
-Requires Node.js 22.13 or newer.
+Requires Node.js 20 or newer.
 
 ```bash
 npm install
-cp .env.example .env     # put your OPENAI_API_KEY in .env
+cp .env.example .env     # put your free GEMINI_API_KEY (or an OPENAI_API_KEY) in .env
 npm start                # open http://localhost:3000
 ```
+
+Locally, data is stored in `data/markcalc.db`. Set `DATABASE_URL` to use a Turso database instead.
 
 No key yet? Set `MOCK_GRADER=1` in `.env` to try the whole app with fake marks.
 
@@ -44,16 +50,16 @@ No key yet? Set `MOCK_GRADER=1` in `.env` to try the whole app with fake marks.
 ```
 server.js            starts the server (reads .env, opens the database)
 src/app.js           Express routes: auth, exams, grading, results, CSV
-src/grader.js        prompt, OpenAI call (strict JSON schema, retries), mark normalisation
+src/grader.js        prompt, Gemini / OpenAI calls (structured JSON, retries, quota handling), mark normalisation
 src/auth.js          password hashing, sessions, rate limiting
-src/db.js            SQLite schema (Node's built-in node:sqlite)
+src/db.js            SQLite schema via libSQL (local file or Turso)
 public/              the website (no build step)
   js/app.js          screens: login, exams, editor, marking, results, help
   js/pages.js        page picker (upload / camera / reorder)
   js/files.js        PDF → images, photo resizing
 scripts/reset-password.js
-docs/SETUP.md        going live step by step
-render.yaml          one-click Render deployment
+docs/SETUP.md        going live for free, step by step
+render.yaml          one-click Render deployment (free plan)
 Dockerfile           for any Docker host
 ```
 

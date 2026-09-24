@@ -43,11 +43,11 @@ function cookieOptions(secure, maxAgeSeconds) {
   return `Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure ? '; Secure' : ''}`;
 }
 
-function createSession(db, userId) {
+async function createSession(db, userId) {
   const token = crypto.randomBytes(32).toString('base64url');
   const expires = Date.now() + SESSION_DAYS * 86400 * 1000;
-  db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)').run(sha256(token), userId, expires);
-  db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());
+  await db.run('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)', sha256(token), userId, expires);
+  await db.run('DELETE FROM sessions WHERE expires_at < ?', Date.now());
   return token;
 }
 
@@ -59,20 +59,20 @@ function clearSessionCookie(res, secure) {
   res.setHeader('Set-Cookie', `${COOKIE}=; ${cookieOptions(secure, 0)}`);
 }
 
-function sessionUser(db, req) {
+async function sessionUser(db, req) {
   const token = parseCookies(req.headers.cookie)[COOKIE];
   if (!token) return null;
-  const row = db
-    .prepare(
-      `SELECT u.id, u.name, u.email FROM sessions s JOIN users u ON u.id = s.user_id
-       WHERE s.token_hash = ? AND s.expires_at > ?`,
-    )
-    .get(sha256(token), Date.now());
+  const row = await db.get(
+    `SELECT u.id, u.name, u.email FROM sessions s JOIN users u ON u.id = s.user_id
+     WHERE s.token_hash = ? AND s.expires_at > ?`,
+    sha256(token),
+    Date.now(),
+  );
   return row ? { id: row.id, name: row.name, email: row.email, token } : null;
 }
 
-function destroySession(db, token) {
-  if (token) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
+async function destroySession(db, token) {
+  if (token) await db.run('DELETE FROM sessions WHERE token_hash = ?', sha256(token));
 }
 
 // Simple fixed-window limiter kept in memory (fine for a single server instance).
@@ -103,6 +103,7 @@ function validateSignup({ name, email, password }) {
 
 module.exports = {
   HttpError,
+  sha256,
   hashPassword,
   verifyPassword,
   createSession,

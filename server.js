@@ -1,27 +1,40 @@
 require('dotenv').config({ quiet: true });
 const { openDb } = require('./src/db');
 const { createApp } = require('./src/app');
+const { providerName, checkProvider } = require('./src/grader');
 
 const port = Number(process.env.PORT) || 3000;
-const dbFile = process.env.DATABASE_FILE || './data/markcalc.db';
+const dbUrl = process.env.DATABASE_URL || 'file:./data/markcalc.db';
 
-if (!process.env.OPENAI_API_KEY && process.env.MOCK_GRADER !== '1') {
-  console.warn('WARNING: OPENAI_API_KEY is not set. Marking will fail until it is configured.');
-}
+(async () => {
+  if (providerName(process.env) === 'none') {
+    console.warn('WARNING: no GEMINI_API_KEY or OPENAI_API_KEY set. Marking will fail until one is configured.');
+  }
+  if (process.env.RENDER && dbUrl.startsWith('file:')) {
+    console.warn('WARNING: using a local database file on Render. Without a disk, data is lost on restart. Set DATABASE_URL to a Turso database.');
+  }
 
-const db = openDb(dbFile);
-const server = createApp({ db }).listen(port, () => {
-  console.log(`Mark calculator running at http://localhost:${port} (database: ${dbFile})`);
-});
-// Grading several pages can take a few minutes.
-server.requestTimeout = 10 * 60 * 1000;
-
-function shutdown() {
-  server.close(() => {
-    db.close();
-    process.exit(0);
+  const db = await openDb({ url: dbUrl, authToken: process.env.DATABASE_AUTH_TOKEN }).catch((err) => {
+    throw new Error(`Could not open the database (${err.message}). Check DATABASE_URL and DATABASE_AUTH_TOKEN.`);
   });
-  setTimeout(() => process.exit(0), 10000).unref();
-}
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+  const server = createApp({ db }).listen(port, () => {
+    console.log(`Mark calculator running at http://localhost:${port} (database: ${dbUrl.split('?')[0]})`);
+  });
+  // Marking several pages can take a few minutes.
+  server.requestTimeout = 10 * 60 * 1000;
+
+  checkProvider().then(({ ok, message }) => (ok ? console.log(`Marking: ${message}`) : console.error(`Marking: ${message}`)));
+
+  const shutdown = () => {
+    server.close(() => {
+      db.close();
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 10000).unref();
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+})().catch((err) => {
+  console.error('Failed to start:', err.message);
+  process.exit(1);
+});

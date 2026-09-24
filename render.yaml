@@ -1,5 +1,5 @@
 # Free deployment on Render (https://render.com). Render → New → Blueprint → pick this repo.
-# Render asks for the values marked `sync: false` (see docs/SETUP.md for where to get them).
+# No database is needed: nothing is stored.
 services:
   - type: web
     name: markcalc
@@ -20,15 +20,6 @@ services:
       # Free Google Gemini key (needs a Google Cloud project): https://aistudio.google.com/app/apikey
       - key: GEMINI_API_KEY
         sync: false
-      # Free database. Either Neon Postgres (https://neon.tech): postgresql://…?sslmode=require
-      # or Turso (https://turso.tech): libsql://markcalc-yourname.turso.io
-      - key: DATABASE_URL
-        sync: false
-      # Only for Turso. Leave empty for Neon.
-      - key: DATABASE_AUTH_TOKEN
-        sync: false
-      # Optional: teachers must enter this code to sign up
-      - key: SIGNUP_CODE
-        sync: false
-      - key: DAILY_GRADING_LIMIT
-        value: "40"
+      # Answer sheets one device can mark per day
+      - key: PER_DEVICE_DAILY_LIMIT
+        value: "15"

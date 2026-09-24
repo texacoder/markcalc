@@ -1,6 +1,5 @@
 // Prepares uploads in the browser: PDFs become one image per page, and large
 // phone photos are resized so uploads are fast and marking stays accurate.
-const MAX_SIDE = 2200;
 const QUALITY = 0.85;
 let pdfjsPromise;
 
@@ -18,17 +17,17 @@ function canvasToBlob(canvas) {
   );
 }
 
-function fit(width, height) {
-  const scale = Math.min(1, MAX_SIDE / Math.max(width, height));
+function fit(width, height, maxSide) {
+  const scale = Math.min(1, maxSide / Math.max(width, height));
   return [Math.round(width * scale), Math.round(height * scale)];
 }
 
-async function imageToJpeg(file) {
+async function imageToJpeg(file, maxSide) {
   // createImageBitmap applies the phone's EXIF rotation.
   const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => {
     throw new Error(`"${file.name}" could not be opened. Use a JPG or PNG photo.`);
   });
-  const [w, h] = fit(bitmap.width, bitmap.height);
+  const [w, h] = fit(bitmap.width, bitmap.height, maxSide);
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;
@@ -40,7 +39,7 @@ async function imageToJpeg(file) {
   return canvasToBlob(canvas);
 }
 
-async function pdfToJpegs(file, onProgress) {
+async function pdfToJpegs(file, onProgress, maxSide) {
   const pdfjs = await loadPdfJs();
   const task = pdfjs.getDocument({ data: await file.arrayBuffer() });
   const doc = await task.promise.catch(() => {
@@ -51,7 +50,7 @@ async function pdfToJpegs(file, onProgress) {
     onProgress?.(`Reading PDF page ${i} of ${doc.numPages}…`);
     const page = await doc.getPage(i);
     const base = page.getViewport({ scale: 1 });
-    const scale = Math.min(3, MAX_SIDE / Math.max(base.width, base.height));
+    const scale = Math.min(3, maxSide / Math.max(base.width, base.height));
     const viewport = page.getViewport({ scale });
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(viewport.width);
@@ -67,14 +66,14 @@ async function pdfToJpegs(file, onProgress) {
 }
 
 // Returns an array of JPEG blobs, one per page.
-export async function prepareFiles(fileList, onProgress) {
+export async function prepareFiles(fileList, onProgress, maxSide = 1600) {
   const out = [];
   for (const file of fileList) {
     if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) {
-      out.push(...(await pdfToJpegs(file, onProgress)));
+      out.push(...(await pdfToJpegs(file, onProgress, maxSide)));
     } else if (file.type.startsWith('image/') || /\.(jpe?g|png|webp|gif|heic)$/i.test(file.name)) {
       onProgress?.(`Preparing ${file.name}…`);
-      out.push(await imageToJpeg(file));
+      out.push(await imageToJpeg(file, maxSide));
     } else {
       throw new Error(`"${file.name}" is not an image or PDF.`);
     }

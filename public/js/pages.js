@@ -5,11 +5,11 @@ import { prepareFiles } from './files.js';
 let uid = 0;
 
 export class PagePicker {
-  // saved: [{ id, url }] pages already stored on the server (question paper when editing)
-  constructor(root, { label, hint, saved = [], onChange } = {}) {
+  constructor(root, { label, hint, onChange, maxSide } = {}) {
     this.root = root;
-    this.items = saved.map((s) => ({ key: `s${s.id}`, savedId: s.id, url: s.url }));
+    this.items = [];
     this.onChange = onChange;
+    this.maxSide = maxSide;
     this.busy = false;
     const id = `pp${++uid}`;
 
@@ -61,7 +61,7 @@ export class PagePicker {
     this.busy = true;
     this.status.hidden = false;
     try {
-      const blobs = await prepareFiles(files, (msg) => (this.status.textContent = msg));
+      const blobs = await prepareFiles(files, (msg) => (this.status.textContent = msg), this.maxSide);
       for (const blob of blobs) this.items.push({ key: `n${++uid}`, blob, url: URL.createObjectURL(blob) });
       this.render();
     } catch (err) {
@@ -79,7 +79,7 @@ export class PagePicker {
     const act = btn.dataset.act;
     if (act === 'remove') {
       const [item] = this.items.splice(i, 1);
-      if (item.blob) URL.revokeObjectURL(item.url);
+      URL.revokeObjectURL(item.url);
     } else if (act === 'left' && i > 0) {
       [this.items[i - 1], this.items[i]] = [this.items[i], this.items[i - 1]];
     } else if (act === 'right' && i < this.items.length - 1) {
@@ -116,25 +116,12 @@ export class PagePicker {
     return this.items.length;
   }
 
-  // Appends new pages to a FormData under `field`; returns saved page ids to keep, in order.
-  // The server stores kept pages first, so if the teacher moved a new page before a saved one,
-  // all pages are re-sent as new to preserve the exact order.
-  async appendTo(form, field) {
-    let seenNew = false;
-    const mixed = this.items.some((item) => (item.savedId ? seenNew : ((seenNew = true), false)));
-    const keep = [];
-    for (const item of this.items) {
-      if (item.savedId && !mixed) keep.push(item.savedId);
-      else {
-        const blob = item.blob || (await fetch(item.url).then((r) => r.blob()));
-        form.append(field, blob, `page-${item.key}.jpg`);
-      }
-    }
-    return keep;
+  appendTo(form, field) {
+    this.items.forEach((item, i) => form.append(field, item.blob, `page-${i + 1}.jpg`));
   }
 
   clear() {
-    for (const item of this.items) if (item.blob) URL.revokeObjectURL(item.url);
+    for (const item of this.items) URL.revokeObjectURL(item.url);
     this.items = [];
     this.render();
   }

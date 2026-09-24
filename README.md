@@ -1,34 +1,39 @@
 # Mark Calculator
 
-A website that marks students' answer sheets for teachers.
+A website that marks answer sheets, for schools, colleges and universities alike. **No login, and nothing is stored.**
 
-A teacher sets up an exam once: syllabus, marking scheme or answer key, question paper, and checking instructions such as *check liberally*, *marks for diagram alone* or *step marks*. After that, they upload each student's answer sheet (phone photos or a PDF) and get:
+The teacher or lecturer opens the site and enters:
+1. exam details (subject or paper, class or course, total marks, syllabus),
+2. the marking scheme or answer key,
+3. the question paper (typed, or photos / a PDF),
+4. checking instructions such as *check liberally*, *marks for diagram alone* or *step marks*,
+5. the student's answer sheet (phone photos or a PDF).
+
+They click **Calculate marks** and get:
 - marks for every question, with what the student wrote and a short remark,
 - the total and percentage, plus feedback,
-- warnings for anything worth checking (unclear handwriting, missing pages),
-- a class results table with the average, highest and lowest marks, and a CSV/Excel export.
+- warnings for anything worth checking (unclear handwriting, missing pages).
 
-Teachers can correct any mark; the total updates automatically.
+Any mark can be corrected. **Mark the next student** keeps the exam details, so a whole class can be marked in a row, and the results list can be downloaded as CSV/Excel. When the page is closed, everything is gone.
 
-Marking is done by an AI vision model **on the server**: OpenAI's GPT-4.1 through free GitHub Models, Google Gemini (free tier), or OpenAI directly. Teachers never see the provider, the key or the prompt.
+Marking is done by an AI vision model **on the server**: OpenAI's GPT-4.1 through free GitHub Models, Google Gemini (free tier), or OpenAI directly. Users never see the provider, the key or the prompt.
 
 ## Put it online for free
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/texacoder/markcalc)
 
-Everything runs on free plans: GitHub Models (AI), Neon or Turso (database) and Render (website), all with your GitHub login. Follow **[docs/SETUP.md](docs/SETUP.md)**. It takes about 15 minutes and no credit card.
+You only need a GitHub token (AI) and Render (website), both free. See **[docs/SETUP.md](docs/SETUP.md)**.
 
 ## Features
 
-- Teacher accounts (email and password), each teacher's data private to them
-- Saved exams, reusable for the whole class
+- No accounts and no database: question papers, answer sheets and results are never saved on the server
 - Question paper and answer sheets as photos or PDFs (PDFs are split into pages in the browser; large photos are resized automatically)
 - "Take photo" button on phones; reorder and remove pages
 - 8 one-tap checking instructions, plus free-text instructions
 - Handles choice questions ("answer any 5"), step marks and half marks
-- Mark correction, printing, and a CSV export for the register
-- Cost/quota controls: optional signup code, per-teacher and site-wide daily limits, friendly messages when the free AI quota runs out
-- Security: hashed passwords, HttpOnly session cookies, rate-limited login, CSP headers, uploads checked by file content
+- Mark correction, printing, a results list for the session, and a CSV/Excel download
+- Protection for the free AI quota: per-device and site-wide daily limits, a page limit, and a cap on how many markings run at the same time
+- Security: uploads checked by file content, requests only accepted from the site itself, CSP headers
 - Works on phones, tablets and computers, in light and dark mode
 
 ## Run it on your computer
@@ -41,24 +46,19 @@ cp .env.example .env     # put a GITHUB_MODELS_TOKEN (or GEMINI_API_KEY / OPENAI
 npm start                # open http://localhost:3000
 ```
 
-Locally, data is stored in `data/markcalc.db`. Set `DATABASE_URL` to a Postgres (Neon, Supabase) or Turso URL to use a hosted database instead.
-
-No key yet? Set `MOCK_GRADER=1` in `.env` to try the whole app with fake marks.
+No key yet? Set `MOCK_GRADER=1` in `.env` to try the whole site with fake marks.
 
 ## Project layout
 
 ```
-server.js            starts the server (reads .env, opens the database)
-src/app.js           Express routes: auth, exams, grading, results, CSV
+server.js            starts the server
+src/app.js           Express: /api/grade (upload + validation + limits), /api/config
 src/grader.js        prompt, GitHub Models / Gemini / OpenAI calls (structured JSON, retries, quota handling), mark normalisation
-src/auth.js          password hashing, sessions, rate limiting
-src/db.js            schema + storage: SQLite file, Turso, or Postgres (Neon/Supabase)
 public/              the website (no build step)
-  js/app.js          screens: login, exams, editor, marking, results, help
+  js/app.js          the marking page, results, session list, CSV, help
   js/pages.js        page picker (upload / camera / reorder)
   js/files.js        PDF → images, photo resizing
-scripts/reset-password.js
-docs/SETUP.md        going live for free, step by step
+docs/SETUP.md        going live for free, and how to test
 render.yaml          one-click Render deployment (free plan)
 Dockerfile           for any Docker host
 ```

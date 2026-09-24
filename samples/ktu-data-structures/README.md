@@ -29,3 +29,7 @@ A short sample paper in the **APJ Abdul Kalam Technological University (KTU)** B
 | **Total** | **23** | **18** | |
 
 **How to judge it:** a total of 17–19 is good (±1). Also check that Q5 is shown as not attempted or not counted, without lowering the total.
+
+## Trial result
+
+Run on the live site with the free Groq service, after the automatic fit-to-limit fix: Arjun got **19 / 23**, against the teacher's **18 / 23**. That's within ±1 and one mark more generous than the answer key.

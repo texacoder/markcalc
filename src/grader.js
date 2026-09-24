@@ -251,11 +251,16 @@ function maxPages(env) {
   return providerName(env) === 'github' ? 7 : 40;
 }
 
+// Drop headers set to null/undefined (lets a caller remove a default).
+function cleanHeaders(h) {
+  return Object.fromEntries(Object.entries(h).filter(([, v]) => v != null));
+}
+
 async function postJson(url, headers, body, env) {
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...headers },
+      headers: cleanHeaders({ 'Content-Type': 'application/json', Accept: 'application/json', ...headers }),
       body: JSON.stringify(body),
       // A redirect would silently turn this POST into a GET of some other page; treat it as an error.
       redirect: 'manual',
@@ -351,22 +356,29 @@ function isReasoningModel(model) {
 
 const TOO_BIG = 'Too much to read in one go. Use fewer pages, or type the questions in the exam setup instead of uploading question-paper photos.';
 
+// Header sets for GitHub Models. Some combinations get a plain-text "OK" instead of a model reply,
+// so the grader tries them in order and remembers the first one that returns a real completion.
+const GITHUB_VARIANTS = [
+  { name: 'json', headers: { Accept: 'application/json', 'User-Agent': 'markcalc/1.0' } },
+  { name: 'github', headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'markcalc/1.0' } },
+  { name: 'json+version', headers: { Accept: 'application/json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'markcalc/1.0' } },
+  { name: 'any', headers: { Accept: '*/*', 'User-Agent': 'markcalc/1.0' } },
+];
+let githubVariant = 0;
+
 // OpenAI and GitHub Models share the same chat-completions format.
 function openAICompatibleConfig(env, provider) {
   if (provider === 'github') {
-    const model = env.GITHUB_MODEL || 'openai/gpt-4.1';
     return {
       label: 'GitHub Models',
       url: `${env.GITHUB_MODELS_BASE_URL || 'https://models.github.ai/inference'}/chat/completions`,
-      headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
       key: env.GITHUB_MODELS_TOKEN,
-      model,
+      model: env.GITHUB_MODEL || 'openai/gpt-4.1',
       maxTokensField: 'max_tokens',
       maxTokens: 4000,
-      // GitHub's older endpoint for the same models, tried if the main one gives no usable reply.
-      fallback: env.GITHUB_MODELS_BASE_URL
-        ? null
-        : { url: 'https://models.inference.ai.azure.com/chat/completions', model: model.replace(/^[^/]+\//, ''), headers: {} },
+      variants: GITHUB_VARIANTS,
+      variant: githubVariant,
+      headers: GITHUB_VARIANTS[githubVariant].headers,
     };
   }
   const model = env.OPENAI_MODEL || 'gpt-4.1';
@@ -406,18 +418,26 @@ async function gradeWithOpenAICompatible(input, env, provider) {
     };
   };
 
-  // What went wrong on the main endpoint, so a failing backup doesn't hide it.
-  let primaryProblem = '';
+  // The first problem seen, so later attempts don't hide it.
+  let firstProblem = '';
   const fail = (message, code, status = 502) =>
-    new GradingError(`${message} [code: ${primaryProblem ? `${primaryProblem}; backup ${code}` : code}]`, status);
-  // Switch to the backup endpoint (once). Returns false if there is none.
-  const useFallback = (problem) => {
-    if (!cfg.fallback) return false;
-    primaryProblem = problem;
-    console.error(`${cfg.label}: main endpoint problem "${problem}", trying the backup endpoint ${cfg.fallback.url}`);
-    Object.assign(cfg, cfg.fallback, { fallback: null });
-    body.model = cfg.model;
+    new GradingError(`${message} [code: ${firstProblem && firstProblem !== code ? `${firstProblem}; then ${code}` : code}]`, status);
+  // GitHub Models: try the next header combination. Returns false when none are left.
+  let variantsTried = 1;
+  const useNextVariant = (problem) => {
+    firstProblem ||= problem;
+    if (!cfg.variants || variantsTried >= cfg.variants.length) return false;
+    cfg.variant = (cfg.variant + 1) % cfg.variants.length;
+    cfg.headers = cfg.variants[cfg.variant].headers;
+    variantsTried += 1;
+    console.error(`${cfg.label}: got "${problem}", retrying with header set "${cfg.variants[cfg.variant].name}"`);
     return true;
+  };
+  const worked = () => {
+    if (cfg.variants && githubVariant !== cfg.variant) {
+      githubVariant = cfg.variant;
+      console.log(`${cfg.label}: using header set "${cfg.variants[cfg.variant].name}" from now on`);
+    }
   };
 
   let networkRetries = 0;
@@ -428,14 +448,17 @@ async function gradeWithOpenAICompatible(input, env, provider) {
       const choice = res.json?.choices?.[0];
       const message = choice?.message;
       const text = replyText(res);
-      if (text && !message?.refusal) return parseResultText(text);
+      if (text && !message?.refusal) {
+        worked();
+        return parseResultText(text);
+      }
 
       if (!choice) {
         // Not a chat completion: log the raw reply so the cause can be seen in the server logs.
         const shape = describeReply(res);
         console.error(`${cfg.label}: unexpected reply (attempt ${attempt}) from ${cfg.url}`, res.status, res.contentType, res.text.slice(0, 1500));
         if (JSON.stringify(res.json?.prompt_filter_results || '').includes('"filtered":true')) throw new GradingError(FILTERED, 422);
-        if (useFallback(`reply-${shape}`)) continue;
+        if (useNextVariant(`reply-${shape}`)) continue;
         throw fail(UNREADABLE, `reply-${shape}`, 422);
       }
 
@@ -489,11 +512,8 @@ async function gradeWithOpenAICompatible(input, env, provider) {
       await sleep(res.status === 429 ? 15000 * networkRetries : 2000 * networkRetries ** 2);
       continue;
     }
-    if ((res.status >= 300 && res.status < 400) || [401, 403, 404, 405].includes(res.status) || permanentNetwork) {
-      if (useFallback(`http-${shape}`)) {
-        networkRetries = 0;
-        continue;
-      }
+    if ((res.status >= 300 && res.status < 400) || [403, 404, 405, 406, 415].includes(res.status)) {
+      if (useNextVariant(`http-${shape}`)) continue;
     }
     if (res.status === 429) throw fail(BUSY, `http-${shape}`, 503);
     if (res.status === 401 || res.status === 403) console.error(`${cfg.label}: the key/token is invalid or lacks permission.`);
@@ -581,54 +601,88 @@ async function selfTest(env = process.env) {
   const provider = providerName(env);
   if (!['github', 'openai'].includes(provider)) return { provider, note: 'Self-test covers GitHub Models and OpenAI.' };
   const cfg = openAICompatibleConfig(env, provider);
-  const endpoints = [{ url: cfg.url, model: cfg.model, headers: cfg.headers || {} }];
-  if (cfg.fallback) endpoints.push(cfg.fallback);
-  const tests = {
-    plain: { messages: [{ role: 'user', content: 'Reply with the single word OK.' }] },
-    schema: {
-      messages: [{ role: 'user', content: 'Set ok to true.' }],
-      response_format: {
-        type: 'json_schema',
-        json_schema: { name: 'check', strict: true, schema: { type: 'object', additionalProperties: false, required: ['ok'], properties: { ok: { type: 'boolean' } } } },
-      },
-    },
-    image: {
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: 'What colour is this image? One word.' },
-            { type: 'image_url', image_url: { url: `data:image/png;base64,${TINY_PNG}`, detail: 'high' } },
-          ],
-        },
-      ],
+  const auth = { Authorization: `Bearer ${cfg.key}` };
+  const quickEnv = { ...env, AI_TIMEOUT_MS: '60000' };
+  const summary = (res, started) => ({
+    status: res.status,
+    contentType: res.contentType || '',
+    shape: describeReply(res),
+    replyText: replyText(res).slice(0, 200),
+    rawStart: String(res.text || '').slice(0, 300),
+    ms: Date.now() - started,
+  });
+  const run = async (headers, extra) => {
+    const started = Date.now();
+    const res = await postJson(cfg.url, { ...auth, ...headers }, { model: cfg.model, [cfg.maxTokensField]: 50, ...extra }, quickEnv);
+    return summary(res, started);
+  };
+  const plain = { messages: [{ role: 'user', content: 'Reply with the single word OK.' }] };
+  const schema = {
+    messages: [{ role: 'user', content: 'Set ok to true.' }],
+    response_format: {
+      type: 'json_schema',
+      json_schema: { name: 'check', strict: true, schema: { type: 'object', additionalProperties: false, required: ['ok'], properties: { ok: { type: 'boolean' } } } },
     },
   };
-  const results = [];
-  for (const ep of endpoints) {
-    for (const [name, extra] of Object.entries(tests)) {
+  const image = {
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'What colour is this image? One word.' },
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${TINY_PNG}`, detail: 'high' } },
+        ],
+      },
+    ],
+  };
+
+  const report = { provider, endpoint: cfg.url, model: cfg.model };
+
+  // GitHub: the model catalogue (does the token work, does the model id exist?) and each header set.
+  if (provider === 'github') {
+    try {
       const started = Date.now();
-      const res = await postJson(
-        ep.url,
-        { Authorization: `Bearer ${cfg.key}`, ...ep.headers },
-        { model: ep.model, [cfg.maxTokensField]: 50, ...extra },
-        { ...env, AI_TIMEOUT_MS: '60000' },
-      );
-      results.push({
-        endpoint: ep.url,
-        model: ep.model,
-        test: name,
-        status: res.status,
-        contentType: res.contentType || '',
-        shape: describeReply(res),
-        replyText: replyText(res).slice(0, 200),
-        rawStart: String(res.text || '').slice(0, 400),
-        ms: Date.now() - started,
+      const r = await fetch('https://models.github.ai/catalog/models', {
+        headers: { ...auth, Accept: 'application/json', 'User-Agent': 'markcalc/1.0' },
+        signal: AbortSignal.timeout(20000),
       });
-      if (res.status === 0 && ['ENOTFOUND', 'EAI_AGAIN'].includes(res.cause)) break; // endpoint doesn't exist
+      const text = await r.text();
+      let ids = [];
+      try {
+        ids = JSON.parse(text).map((m) => m.id);
+      } catch {}
+      report.catalog = {
+        status: r.status,
+        models: ids.length,
+        modelListed: ids.includes(cfg.model),
+        visionModels: ids.filter((id) => /gpt-4\.1|gpt-4o|gpt-5|llama-4|phi-4-multimodal/i.test(id)).slice(0, 12),
+        rawStart: ids.length ? '' : text.slice(0, 300),
+        ms: Date.now() - started,
+      };
+    } catch (err) {
+      report.catalog = { error: String(err), cause: err?.cause?.code };
     }
+    report.headerSets = [];
+    let working = null;
+    for (const v of GITHUB_VARIANTS) {
+      const r = await run(v.headers, plain);
+      report.headerSets.push({ name: v.name, ...r });
+      if (r.replyText && !working) {
+        working = v;
+        break;
+      }
+    }
+    report.workingHeaderSet = working ? working.name : 'none';
+    if (!working) return report;
+    report.schemaTest = await run(working.headers, schema);
+    report.imageTest = await run(working.headers, image);
+    return report;
   }
-  return { provider, results };
+
+  report.plainTest = await run({}, plain);
+  report.schemaTest = await run({}, schema);
+  report.imageTest = await run({}, image);
+  return report;
 }
 
 // Startup self-check so setup mistakes (bad key, unknown model) show up clearly in the server logs.
@@ -697,6 +751,9 @@ module.exports = {
   requestTooLarge,
   checkProvider,
   selfTest,
+  resetForTests: () => {
+    githubVariant = 0;
+  },
   GradingError,
   RESULT_SCHEMA,
 };

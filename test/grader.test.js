@@ -234,37 +234,7 @@ test('GitHub Models: refusals and content filters give specific messages', async
   await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: filter\]/);
 
   t.mock.method(globalThis, 'fetch', async () => new Response('bad credentials', { status: 401 }));
-  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: http-401-text; backup auth-401\]/);
-});
-
-test('GitHub Models: sends GitHub headers; odd replies fall back to the older endpoint', async (t) => {
-  t.mock.method(console, 'error', () => {});
-  const calls = [];
-  const replies = [
-    new Response('<html>not an API</html>', { status: 200, headers: { 'content-type': 'text/html' } }),
-    Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(GOOD) } }] }),
-  ];
-  t.mock.method(globalThis, 'fetch', async (url, init) => { calls.push({ url, init, body: JSON.parse(init.body) }); return replies.shift(); });
-  const r = await grade(INPUT, { GITHUB_MODELS_TOKEN: 't' });
-  assert.strictEqual(r.totalAwarded, 6);
-  assert.strictEqual(calls[0].init.headers['X-GitHub-Api-Version'], '2022-11-28');
-  assert.strictEqual(calls[0].init.redirect, 'manual');
-  assert.strictEqual(calls[1].url, 'https://models.inference.ai.azure.com/chat/completions');
-  assert.strictEqual(calls[1].body.model, 'gpt-4.1');
-
-  // A redirect on the main endpoint also switches to the fallback.
-  const urls = [];
-  const replies2 = [
-    new Response('', { status: 302, headers: { location: 'https://github.com/marketplace/models' } }),
-    Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(GOOD) } }] }),
-  ];
-  t.mock.method(globalThis, 'fetch', async (url) => { urls.push(url); return replies2.shift(); });
-  assert.strictEqual((await grade(INPUT, { GITHUB_MODELS_TOKEN: 't' })).totalAwarded, 6);
-  assert.match(urls[1], /models\.inference\.ai\.azure\.com/);
-
-  // Both endpoints give nothing usable: a specific code.
-  t.mock.method(globalThis, 'fetch', async () => Response.json({ choices: [] }));
-  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: reply-200-keys:choices; backup reply-200-keys:choices\]/);
+  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: auth-401\]/);
 });
 
 test('OpenAI-compatible replies: streamed and "responses" formats are understood', async (t) => {
@@ -279,38 +249,54 @@ test('OpenAI-compatible replies: streamed and "responses" formats are understood
   assert.strictEqual((await grade(INPUT, { GITHUB_MODELS_TOKEN: 't' })).totalAwarded, 6);
 });
 
-test('a missing backup endpoint does not hide the main problem, and is not retried', async (t) => {
+
+const { selfTest, resetForTests } = require('../src/grader');
+
+test('GitHub Models: a plain-text "OK" reply makes it try the next header set, and remembers the one that works', async (t) => {
+  resetForTests();
   t.mock.method(console, 'error', () => {});
-  let calls = 0;
-  t.mock.method(globalThis, 'fetch', async (url) => {
-    calls++;
-    if (String(url).includes('models.github.ai')) return new Response('<html>oops</html>', { status: 200 });
-    const err = new TypeError('fetch failed');
-    err.cause = { code: 'ENOTFOUND', message: 'getaddrinfo ENOTFOUND' };
-    throw err;
+  t.mock.method(console, 'log', () => {});
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    calls.push(init.headers);
+    return init.headers.Accept === 'application/vnd.github+json'
+      ? Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(GOOD) } }] })
+      : new Response('OK\r\n', { headers: { 'content-type': 'text/plain' } });
   });
-  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: reply-200-html; backup http-network-ENOTFOUND\]/);
-  assert.strictEqual(calls, 2);
+  assert.strictEqual((await grade(INPUT, { GITHUB_MODELS_TOKEN: 't' })).totalAwarded, 6);
+  assert.strictEqual(calls[0].Accept, 'application/json');
+  assert.strictEqual(calls[0]['User-Agent'], 'markcalc/1.0');
+  assert.strictEqual(calls[1].Accept, 'application/vnd.github+json');
+  assert.strictEqual(calls[1]['X-GitHub-Api-Version'], '2022-11-28');
+  // Next marking starts with the header set that worked.
+  calls.length = 0;
+  await grade(INPUT, { GITHUB_MODELS_TOKEN: 't' });
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0].Accept, 'application/vnd.github+json');
+  resetForTests();
 });
 
-const { selfTest } = require('../src/grader');
+test('GitHub Models: when every header set gets "OK", the code says so', async (t) => {
+  resetForTests();
+  t.mock.method(console, 'error', () => {});
+  let n = 0;
+  t.mock.method(globalThis, 'fetch', async () => { n++; return new Response('OK\r\n', { headers: { 'content-type': 'text/plain' } }); });
+  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: reply-200-text\]/);
+  assert.strictEqual(n, 4);
+  resetForTests();
+});
 
-test('selfTest reports what each endpoint returned', async (t) => {
+test('selfTest checks the catalogue and each header set, then schema and image with the working one', async (t) => {
   t.mock.method(globalThis, 'fetch', async (url, init) => {
-    const body = JSON.parse(init.body);
-    if (String(url).includes('models.github.ai')) {
-      return body.response_format ? new Response('{"error":{"message":"bad schema"}}', { status: 400 }) : Response.json({ choices: [{ message: { content: 'OK' } }] });
-    }
-    const err = new TypeError('fetch failed');
-    err.cause = { code: 'ENOTFOUND' };
-    throw err;
+    if (String(url).endsWith('/catalog/models')) return Response.json([{ id: 'openai/gpt-4.1' }, { id: 'openai/gpt-4o' }]);
+    return init.headers['X-GitHub-Api-Version'] && init.headers.Accept === 'application/json'
+      ? Response.json({ choices: [{ message: { content: 'OK' } }] })
+      : new Response('OK\r\n', { headers: { 'content-type': 'text/plain' } });
   });
   const r = await selfTest({ GITHUB_MODELS_TOKEN: 't' });
-  assert.strictEqual(r.provider, 'github');
-  const main = r.results.filter((x) => x.endpoint.includes('models.github.ai'));
-  assert.deepStrictEqual(main.map((x) => [x.test, x.status]), [['plain', 200], ['schema', 400], ['image', 200]]);
-  assert.strictEqual(main[0].replyText, 'OK');
-  const backup = r.results.filter((x) => !x.endpoint.includes('models.github.ai'));
-  assert.strictEqual(backup.length, 1); // stops after ENOTFOUND
-  assert.strictEqual(backup[0].shape, 'network-ENOTFOUND');
+  assert.strictEqual(r.catalog.modelListed, true);
+  assert.deepStrictEqual(r.headerSets.map((h) => [h.name, h.shape]), [['json', '200-text'], ['github', '200-text'], ['json+version', '200-keys:choices']]);
+  assert.strictEqual(r.workingHeaderSet, 'json+version');
+  assert.strictEqual(r.schemaTest.status, 200);
+  assert.strictEqual(r.imageTest.status, 200);
 });

@@ -1,6 +1,6 @@
 // A page picker: upload / photograph / drag pages, preview them, reorder and remove.
 import { html, mount, $, toast } from './ui.js';
-import { prepareFiles } from './files.js';
+import { prepareFiles, shrinkImage } from './files.js';
 
 let uid = 0;
 
@@ -125,8 +125,12 @@ export class PagePicker {
     return this.items.length;
   }
 
-  appendTo(form, field) {
-    this.items.forEach((item, i) => form.append(field, item.blob, `page-${i + 1}.jpg`));
+  // factor < 1 sends smaller copies of the pages (the originals are kept).
+  async appendTo(form, field, factor = 1) {
+    for (const [i, item] of this.items.entries()) {
+      const blob = factor < 1 ? await shrinkImage(item.blob, factor) : item.blob;
+      form.append(field, blob, `page-${i + 1}.jpg`);
+    }
   }
 
   clear() {

@@ -201,9 +201,11 @@ function mockResult(setup) {
 }
 
 class GradingError extends Error {
-  constructor(message, status = 502) {
+  // details: extra fields for the browser, e.g. { shrinkImages: 0.8 } to resend smaller pages.
+  constructor(message, status = 502, details = {}) {
     super(message);
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -392,13 +394,15 @@ function openAICompatibleConfig(env, provider) {
   if (provider === 'groq') {
     return {
       label: 'Groq',
-      url: 'https://api.groq.com/openai/v1/chat/completions',
-      modelsUrl: 'https://api.groq.com/openai/v1/models',
+      url: `${env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`,
+      modelsUrl: `${env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/models`,
       key: env.GROQ_API_KEY,
       // No fixed default: Groq retires models often, so one that reads images is picked automatically.
       model: env.GROQ_MODEL || '',
       maxTokensField: 'max_completion_tokens',
-      maxTokens: 4000,
+      // Groq's free tier counts the reply allowance against a small per-minute token limit;
+      // marks for ~15 questions fit comfortably in 2500.
+      maxTokens: 2500,
     };
   }
   if (provider === 'openrouter') {
@@ -536,6 +540,21 @@ async function discoverModel(cfg, env, needImages, { maxTries = 8 } = {}) {
   return found;
 }
 
+// Groq-style "Request too large … (TPM): Limit 6000, Requested 9105" / "Limit 6000, Used 5000, Requested 2000".
+function parseTokenLimit(text) {
+  const m = /Limit\s+(\d+),\s*(?:Used\s+(\d+),\s*)?Requested\s+(\d+)/i.exec(String(text));
+  return m ? { limit: Number(m[1]), used: m[2] ? Number(m[2]) : 0, requested: Number(m[3]) } : null;
+}
+const imageCount = (input) => ['syllabusFiles', 'schemeFiles', 'questionFiles', 'answerFiles'].reduce((n, k) => n + (input[k]?.length || 0), 0);
+function textTokenEstimate(input) {
+  const setup = input.setup || {};
+  const text = ['subject', 'className', 'totalMarks', 'syllabus', 'scheme', 'extra', 'questionText', 'instructions', 'answerText']
+    .map((k) => String(setup[k] || ''))
+    .join('');
+  return Math.ceil((text.length + SYSTEM_PROMPT.length + JSON.stringify(RESULT_SCHEMA).length) / 3.5);
+}
+const MIN_REPLY_TOKENS = 1000;
+
 const hasImages = (input) => ['syllabusFiles', 'schemeFiles', 'questionFiles', 'answerFiles'].some((k) => input[k]?.length);
 const MODEL_PROBLEM = /model_not_found|model.{0,40}(does not exist|not found|decommissioned|deprecated|no longer|not supported|unavailable)|image.{0,40}not supported|does not support (image|vision|multimodal)|not a (vision|multimodal) model|image_url.{0,40}(not|unsupported)|content must be a string/i;
 const NO_VISION =
@@ -618,7 +637,8 @@ async function gradeWithOpenAICompatible(input, env, provider) {
   };
 
   let networkRetries = 0;
-  for (let attempt = 1; attempt <= 8; attempt++) {
+  let replyCuts = 0;
+  for (let attempt = 1; attempt <= 10; attempt++) {
     const res = await postJson(cfg.url, { Authorization: `Bearer ${cfg.key}`, ...cfg.headers }, body, env);
 
     if (res.ok) {
@@ -692,8 +712,49 @@ async function gradeWithOpenAICompatible(input, env, provider) {
       if (attempt < 2) continue;
       throw new GradingError(FILTERED, 422);
     }
-    if (res.status === 413 || /tokens_limit_reached|too large|maximum context|max.*tokens/i.test(res.text)) {
-      throw new GradingError(TOO_BIG, 413);
+    // Over the service's per-minute token limit: shrink the reply allowance, and if that isn't
+    // enough, ask the browser to resend smaller page images.
+    const tokenLimit = (res.status === 413 || res.status === 429) && /request too large|reduce your message size/i.test(res.text) ? parseTokenLimit(res.text) : null;
+    if (tokenLimit) {
+      const reply = body[cfg.maxTokensField];
+      const over = tokenLimit.requested - tokenLimit.limit + 200;
+      if (reply - over >= MIN_REPLY_TOKENS && replyCuts < 2) {
+        replyCuts += 1;
+        body[cfg.maxTokensField] = reply - over;
+        console.error(`${cfg.label}: over the per-minute token limit (${tokenLimit.requested}/${tokenLimit.limit}); reply allowance ${reply} -> ${reply - over}`);
+        continue;
+      }
+      const images = imageCount(input);
+      const inputTokens = tokenLimit.requested - reply;
+      const textTokens = Math.min(textTokenEstimate(input), inputTokens);
+      const imageTokens = inputTokens - textTokens;
+      const roomForImages = tokenLimit.limit - MIN_REPLY_TOKENS - 200 - textTokens;
+      console.error(`${cfg.label}: too large even with a short reply: ~${textTokens} text + ~${imageTokens} image tokens, limit ${tokenLimit.limit}`);
+      if (images && imageTokens > 0 && roomForImages > imageTokens * 0.2) {
+        const shrink = Math.max(0.45, Math.min(0.95, Math.sqrt(roomForImages / imageTokens) * 0.95));
+        const perPage = Math.round(imageTokens / images);
+        const pagesThatFit = Math.max(1, Math.floor(roomForImages / Math.max(1, perPage)));
+        throw new GradingError(
+          `Too much to read in one go for the free marking service. About ${pagesThatFit} page${pagesThatFit === 1 ? '' : 's'} fit at this size. Use fewer pages, or shorten the typed syllabus/scheme. [code: too-big-${tokenLimit.requested}-${tokenLimit.limit}]`,
+          413,
+          { shrinkImages: Number(shrink.toFixed(2)) },
+        );
+      }
+      throw new GradingError(
+        `The typed text (syllabus, scheme, questions, answers) is too long for the free marking service. Shorten the syllabus (it is optional) or keep the scheme to key points. [code: too-big-${tokenLimit.requested}-${tokenLimit.limit}]`,
+        413,
+      );
+    }
+    if (res.status === 413 || /tokens_limit_reached|too large|maximum context|context length/i.test(res.text)) {
+      throw new GradingError(`${TOO_BIG} [code: too-big-${res.status}]`, 413);
+    }
+    // Per-minute limit hit because of earlier requests: wait as long as the service says.
+    const waitMatch = res.status === 429 && /try again in\s+([\d.]+)\s*(ms|s)/i.exec(res.text);
+    if (waitMatch && networkRetries < 2) {
+      networkRetries += 1;
+      const ms = Number(waitMatch[1]) * (waitMatch[2].toLowerCase() === 'ms' ? 1 : 1000);
+      await sleep(Math.min(ms + 500, 65000));
+      continue;
     }
     if (res.status === 429 && /86400|per day|daily|ByDay/i.test(res.text)) {
       throw new GradingError("Today's free marking limit has been reached. Please try again tomorrow.", 429);

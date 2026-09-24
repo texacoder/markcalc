@@ -104,3 +104,20 @@ export async function prepareFiles(fileList, { onProgress, maxSide = 1600, extra
   }
   return out;
 }
+
+// A smaller copy of a page image (factor 0–1), used when the marking service can't read
+// that much at once.
+export async function shrinkImage(blob, factor) {
+  const bitmap = await createImageBitmap(blob);
+  const w = Math.max(320, Math.round(bitmap.width * factor));
+  const h = Math.max(320, Math.round(bitmap.height * factor));
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close?.();
+  return canvasToBlob(canvas);
+}

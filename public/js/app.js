@@ -1,6 +1,6 @@
 // Single-page marking tool. No login and nothing is stored on the server:
 // everything lives in this page until it is closed.
-import { api } from './api.js';
+import { api, ApiError } from './api.js';
 import { html, mount, $, $$, fmt, scoreClass, toast, setBusy, confirmDialog } from './ui.js';
 import { PagePicker } from './pages.js';
 
@@ -187,22 +187,35 @@ function renderMarkPage() {
       return fail("Please add the student's answer sheet: photos, a PDF, or typed answers.", $('#answer-card'));
     }
 
-    const fd = new FormData();
-    for (const name of ['subject', 'className', 'totalMarks', 'syllabus', 'scheme', 'extra', 'questionText', 'instructions', 'answerText', 'studentName', 'rollNo']) {
-      fd.append(name, form.elements[name].value);
-    }
-    fd.append('presets', JSON.stringify($$('input[name=preset]:checked', form).map((c) => c.value)));
-    pickers.syllabus.appendTo(fd, 'syllabusFiles');
-    pickers.scheme.appendTo(fd, 'schemeFiles');
-    pickers.question.appendTo(fd, 'questionPaper');
-    pickers.answer.appendTo(fd, 'answerSheet');
+    // factor < 1 sends smaller copies of the page images.
+    const buildForm = async (factor = 1) => {
+      const fd = new FormData();
+      for (const name of ['subject', 'className', 'totalMarks', 'syllabus', 'scheme', 'extra', 'questionText', 'instructions', 'answerText', 'studentName', 'rollNo']) {
+        fd.append(name, form.elements[name].value);
+      }
+      fd.append('presets', JSON.stringify($$('input[name=preset]:checked', form).map((c) => c.value)));
+      await pickers.syllabus.appendTo(fd, 'syllabusFiles', factor);
+      await pickers.scheme.appendTo(fd, 'schemeFiles', factor);
+      await pickers.question.appendTo(fd, 'questionPaper', factor);
+      await pickers.answer.appendTo(fd, 'answerSheet', factor);
+      return fd;
+    };
 
     const btn = $('#mark-btn');
     setBusy(btn, true, 'Marking…');
     const progress = showProgress(pickers.question.count(), pickers.answer.count());
     grading = true;
     try {
-      const result = await api('/grade', { method: 'POST', form: fd });
+      let result;
+      try {
+        result = await api('/grade', { method: 'POST', form: await buildForm() });
+      } catch (ex) {
+        // The free marking service can't read this much at once: resend smaller pages, once.
+        const factor = ex instanceof ApiError && ex.status === 413 ? Number(ex.data?.shrinkImages) : 0;
+        if (!(factor > 0 && factor < 1)) throw ex;
+        progress.note('Making the pages a little smaller for the marking service…');
+        result = await api('/grade', { method: 'POST', form: await buildForm(factor) });
+      }
       result.id = Date.now();
       session.unshift(result);
       renderResult(result);
@@ -270,6 +283,9 @@ function showProgress(qpPages, asPages) {
   }, 9000);
   const t2 = setInterval(() => ($('.progress-time', dlg).textContent = `${Math.round((Date.now() - started) / 1000)}s`), 1000);
   return {
+    note(text) {
+      $('.progress-step', dlg).textContent = text;
+    },
     close() {
       clearInterval(t1);
       clearInterval(t2);

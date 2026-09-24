@@ -320,7 +320,7 @@ test('Groq / OpenRouter: chosen over the GitHub token, right limits and request 
   assert.strictEqual(calls[0].url, 'https://api.groq.com/openai/v1/chat/completions');
   assert.strictEqual(calls[0].headers.Authorization, 'Bearer q');
   assert.strictEqual(calls[0].body.model, 'some/vision-model');
-  assert.strictEqual(calls[0].body.max_completion_tokens, 4000);
+  assert.strictEqual(calls[0].body.max_completion_tokens, 2500);
   assert.strictEqual(calls[0].body.response_format.type, 'json_schema');
   assert.strictEqual(calls[1].body.response_format.type, 'json_object');
   assert.strictEqual(calls[2].body.response_format, undefined);
@@ -438,4 +438,56 @@ test('Groq with no model set: lists models, picks the one that reads images, the
   assert.strictEqual(used[0], 'qwen/qwen3.6-27b'); // ranked first, so only one test was needed
   assert.strictEqual(used.at(-1), 'qwen/qwen3.6-27b');
   resetForTests();
+});
+
+const TPM = (limit, requested) =>
+  Response.json(
+    { error: { message: `Request too large for model \`qwen/qwen3.6-27b\` in organization \`org_x\` service tier \`on_demand\` on tokens per minute (TPM): Limit ${limit}, Requested ${requested}, please reduce your message size and try again.`, type: 'tokens', code: 'rate_limit_exceeded' } },
+    { status: 413 },
+  );
+
+test('over the per-minute token limit: the reply allowance shrinks first', async (t) => {
+  resetForTests();
+  t.mock.method(console, 'error', () => {});
+  const bodies = [];
+  const replies = [TPM(6000, 6800), Response.json({ choices: [{ message: { content: JSON.stringify(GOOD) } }] })];
+  t.mock.method(globalThis, 'fetch', async (url, init) => { bodies.push(JSON.parse(init.body)); return replies.shift(); });
+  const r = await grade(INPUT, { GROQ_API_KEY: 'q', GROQ_MODEL: 'm' });
+  assert.strictEqual(r.totalAwarded, 6);
+  assert.strictEqual(bodies[0].max_completion_tokens, 2500);
+  assert.strictEqual(bodies[1].max_completion_tokens, 2500 - (6800 - 6000 + 200));
+});
+
+test('far over the limit with images: asks the browser to resend smaller pages', async (t) => {
+  resetForTests();
+  t.mock.method(console, 'error', () => {});
+  t.mock.method(globalThis, 'fetch', async () => TPM(6000, 9500));
+  const input = { ...INPUT, answerFiles: [INPUT.answerFiles[0], INPUT.answerFiles[0]] };
+  await assert.rejects(grade(input, { GROQ_API_KEY: 'q', GROQ_MODEL: 'm' }), (err) => {
+    assert.strictEqual(err.status, 413);
+    assert.ok(err.details.shrinkImages > 0.4 && err.details.shrinkImages < 1, String(err.details.shrinkImages));
+    assert.match(err.message, /\[code: too-big-9500-6000\]/);
+    return true;
+  });
+  // Text only and too long: no image hint, a message about the text.
+  t.mock.method(globalThis, 'fetch', async () => TPM(6000, 12000));
+  await assert.rejects(grade({ setup: { answerText: 'x' }, answerFiles: [] }, { GROQ_API_KEY: 'q', GROQ_MODEL: 'm' }), (err) => {
+    assert.deepStrictEqual(err.details, {});
+    assert.match(err.message, /typed text/);
+    return true;
+  });
+});
+
+test('per-minute limit from earlier requests: waits as long as the service says', async (t) => {
+  resetForTests();
+  t.mock.method(console, 'error', () => {});
+  const waits = [];
+  t.mock.method(globalThis, 'setTimeout', (fn, ms) => { waits.push(ms); fn(); return 0; });
+  const replies = [
+    Response.json({ error: { message: 'Rate limit reached for model `m` on tokens per minute (TPM): Limit 6000, Used 5200, Requested 2400. Please try again in 7.25s.' } }, { status: 429 }),
+    Response.json({ choices: [{ message: { content: JSON.stringify(GOOD) } }] }),
+  ];
+  t.mock.method(globalThis, 'fetch', async () => replies.shift());
+  assert.strictEqual((await grade(INPUT, { GROQ_API_KEY: 'q', GROQ_MODEL: 'm' })).totalAwarded, 6);
+  assert.ok(waits.includes(7750), JSON.stringify(waits));
 });

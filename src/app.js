@@ -231,7 +231,9 @@ function createApp({ env = process.env } = {}) {
 
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
-    if (err instanceof HttpError || err instanceof GradingError) return res.status(err.status).json({ error: err.message });
+    if (err instanceof HttpError || err instanceof GradingError) {
+      return res.status(err.status).json({ error: err.message, ...(err.details || {}) });
+    }
     if (err instanceof multer.MulterError) {
       const msg =
         err.code === 'LIMIT_FILE_SIZE' ? `Each page must be under ${MAX_FILE_MB} MB.` : 'Too many pages uploaded at once.';

@@ -1,8 +1,9 @@
 // Thin wrapper around fetch for the app's JSON API.
 export class ApiError extends Error {
-  constructor(status, message) {
+  constructor(status, message, data = {}) {
     super(message);
     this.status = status;
+    this.data = data;
   }
 }
 
@@ -21,6 +22,6 @@ export async function api(path, { method = 'GET', json, form } = {}) {
     throw new ApiError(0, 'Could not reach the server. Check your internet connection and try again.');
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(res.status, data.error || 'Something went wrong. Please try again.');
+  if (!res.ok) throw new ApiError(res.status, data.error || 'Something went wrong. Please try again.', data);
   return data;
 }

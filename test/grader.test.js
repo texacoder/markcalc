@@ -327,17 +327,67 @@ test('Groq / OpenRouter: chosen over the GitHub token, right limits and request 
   assert.match(calls[2].body.messages[0].content, /JSON Schema/);
 });
 
-test('selfTest for Groq lists the models that can read images', async (t) => {
-  t.mock.method(globalThis, 'fetch', async (url) => {
+test('selfTest for Groq lists all models, finds one that reads images, and tests with it', async (t) => {
+  resetForTests();
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
     if (String(url).endsWith('/models')) {
-      return Response.json({ data: [{ id: 'meta-llama/llama-4-scout-17b-16e-instruct' }, { id: 'llama-3.1-8b-instant' }] });
+      return Response.json({ data: [{ id: 'llama-3.3-70b-versatile' }, { id: 'whisper-large-v3' }, { id: 'qwen/qwen3-vl-32b' }] });
     }
-    return Response.json({ choices: [{ message: { content: 'OK' } }] });
+    const body = JSON.parse(init.body);
+    const withImage = JSON.stringify(body.messages).includes('image_url');
+    if (body.model === 'meta-llama/llama-4-scout-17b-16e-instruct') {
+      return Response.json({ error: { code: 'model_not_found', message: 'The model does not exist' } }, { status: 404 });
+    }
+    if (withImage && body.model !== 'qwen/qwen3-vl-32b') {
+      return Response.json({ error: { message: 'model does not support image input' } }, { status: 400 });
+    }
+    return Response.json({ choices: [{ message: { content: withImage ? 'Red' : 'OK' } }] });
   });
   const r = await selfTest({ GROQ_API_KEY: 'q' });
-  assert.strictEqual(r.provider, 'groq');
-  assert.strictEqual(r.models.modelListed, true);
-  assert.deepStrictEqual(r.models.canReadImages, ['meta-llama/llama-4-scout-17b-16e-instruct']);
-  assert.strictEqual(r.plainTest.replyText, 'OK');
-  assert.strictEqual(r.imageTest.status, 200);
+  assert.deepStrictEqual(r.models.all, ['llama-3.3-70b-versatile', 'whisper-large-v3', 'qwen/qwen3-vl-32b']);
+  assert.strictEqual(r.models.modelListed, false);
+  assert.deepStrictEqual(r.imageCheck.map((x) => [x.model, x.ok]), [['qwen/qwen3-vl-32b', true], ['llama-3.3-70b-versatile', false]]);
+  assert.strictEqual(r.modelThatReadsImages, 'qwen/qwen3-vl-32b');
+  assert.strictEqual(r.testedModel, 'qwen/qwen3-vl-32b');
+  assert.strictEqual(r.imageTest.replyText, 'Red');
+  resetForTests();
+});
+
+test('marking replaces a retired model with one that reads images, and remembers it', async (t) => {
+  resetForTests();
+  t.mock.method(console, 'error', () => {});
+  t.mock.method(console, 'log', () => {});
+  const used = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    if (String(url).endsWith('/models')) return Response.json({ data: [{ id: 'llama-3.3-70b-versatile' }, { id: 'vision-model-90b' }] });
+    const body = JSON.parse(init.body);
+    used.push(body.model);
+    if (body.model === 'meta-llama/llama-4-scout-17b-16e-instruct') {
+      return Response.json({ error: { code: 'model_not_found', message: 'The model `x` does not exist or you do not have access to it.' } }, { status: 404 });
+    }
+    if (body.model !== 'vision-model-90b') return Response.json({ error: { message: 'This model does not support image input' } }, { status: 400 });
+    const isProbe = body.max_completion_tokens === 20;
+    return Response.json({ choices: [{ message: { content: isProbe ? 'Red' : JSON.stringify(GOOD) } }] });
+  });
+  const r = await grade(INPUT, { GROQ_API_KEY: 'q' });
+  assert.strictEqual(r.totalAwarded, 6);
+  assert.strictEqual(used.at(-1), 'vision-model-90b');
+  used.length = 0;
+  await grade(INPUT, { GROQ_API_KEY: 'q' });
+  assert.deepStrictEqual(used, ['vision-model-90b']); // straight to the remembered model
+  resetForTests();
+});
+
+test('when no model can read images, the message says to type the answers', async (t) => {
+  resetForTests();
+  t.mock.method(console, 'error', () => {});
+  t.mock.method(console, 'log', () => {});
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    if (String(url).endsWith('/models')) return Response.json({ data: [{ id: 'text-only-70b' }] });
+    const body = JSON.parse(init.body);
+    if (body.model === 'meta-llama/llama-4-scout-17b-16e-instruct') return Response.json({ error: { code: 'model_not_found' } }, { status: 404 });
+    return Response.json({ error: { message: 'model does not support image input' } }, { status: 400 });
+  });
+  await assert.rejects(grade(INPUT, { GROQ_API_KEY: 'q' }), /\[code: no-vision-model\]/);
+  resetForTests();
 });

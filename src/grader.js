@@ -445,6 +445,97 @@ function visionModels(provider, list) {
   return list.map((m) => m.id).filter((id) => /vision|llama-4|scout|maverick|gpt-4\.1|gpt-4o|gpt-5|pixtral|gemma-3|qwen.*vl/i.test(id)).slice(0, 15);
 }
 
+// A 1×1 red PNG used to test whether a model can read images.
+const TINY_PNG =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC';
+
+// ---------------- choosing a model automatically ----------------
+// Free services rename and retire models often. When the configured model is missing or can't read
+// images, list the service's models and send each likely one a tiny test; use the first that works.
+
+const TINY_IMAGE_MESSAGE = [
+  {
+    role: 'user',
+    content: [
+      { type: 'text', text: 'What colour is this image? Answer with one word.' },
+      { type: 'image_url', image_url: { url: `data:image/png;base64,${TINY_PNG}` } },
+    ],
+  },
+];
+const TINY_TEXT_MESSAGE = [{ role: 'user', content: 'Reply with the single word OK.' }];
+const NOT_CHAT_MODEL = /whisper|tts|speech|audio|guard|playai|orpheus|distil|embed|rerank|moderation|transcri|allam/i;
+const discoveredModels = {}; // "<label>:vision|text" -> model id, or null if none works
+
+function rankModel(id) {
+  const s = id.toLowerCase();
+  let score = 0;
+  if (/maverick/.test(s)) score += 10;
+  if (/scout/.test(s)) score += 9;
+  if (/vl\b|vl-|vision|multimodal|omni|pixtral/.test(s)) score += 8;
+  if (/llama-4|gpt-4|gpt-5|gemma-3|qwen3|qwen-?2\.5|kimi|mistral/.test(s)) score += 4;
+  const size = Number((s.match(/(\d+)b\b/) || [])[1] || 0);
+  score += Math.min(size, 400) / 100;
+  if (/:free$/.test(s)) score += 1;
+  return score;
+}
+
+async function listModels(cfg) {
+  const r = await fetch(cfg.modelsUrl, {
+    headers: { Authorization: `Bearer ${cfg.key}`, Accept: 'application/json', ...cfg.headers },
+    signal: AbortSignal.timeout(20000),
+  });
+  const j = await r.json().catch(() => ({}));
+  return Array.isArray(j.data) ? j.data : [];
+}
+
+// Candidate chat models, best first. OpenRouter reports which models take images, so use that.
+function candidateModels(cfg, list, needImages) {
+  let models = list.filter((m) => m.active !== false && !NOT_CHAT_MODEL.test(m.id));
+  if (cfg.label === 'OpenRouter') {
+    if (needImages) models = models.filter((m) => (m.architecture?.input_modalities || []).includes('image'));
+    models = models.filter((m) => m.id.endsWith(':free'));
+  }
+  return models.map((m) => m.id).sort((a, b) => rankModel(b) - rankModel(a));
+}
+
+async function tryModel(cfg, model, needImages, env) {
+  const res = await postJson(
+    cfg.url,
+    { Authorization: `Bearer ${cfg.key}`, ...cfg.headers },
+    { model, [cfg.maxTokensField]: 20, messages: needImages ? TINY_IMAGE_MESSAGE : TINY_TEXT_MESSAGE },
+    { ...env, AI_TIMEOUT_MS: '30000' },
+  );
+  return { model, ok: res.ok && !!replyText(res), status: res.status, reply: replyText(res).slice(0, 40), error: res.ok ? '' : String(res.text).slice(0, 160) };
+}
+
+async function discoverModel(cfg, env, needImages, { maxTries = 8 } = {}) {
+  const key = `${cfg.label}:${needImages ? 'vision' : 'text'}`;
+  if (key in discoveredModels) return discoveredModels[key];
+  let found = null;
+  try {
+    const candidates = candidateModels(cfg, await listModels(cfg), needImages).slice(0, maxTries);
+    for (const id of candidates) {
+      const r = await tryModel(cfg, id, needImages, env);
+      console.error(`${cfg.label}: model test ${id} (${needImages ? 'image' : 'text'}): ${r.ok ? 'works' : `no (${r.status})`}`);
+      if (r.ok) {
+        found = id;
+        break;
+      }
+    }
+  } catch (err) {
+    console.error(`${cfg.label}: could not list models:`, err.message);
+    return null; // don't cache a network failure
+  }
+  discoveredModels[key] = found;
+  console.log(`${cfg.label}: ${found ? `using model "${found}"` : `no model that can ${needImages ? 'read images' : 'chat'} was found`}`);
+  return found;
+}
+
+const hasImages = (input) => ['syllabusFiles', 'schemeFiles', 'questionFiles', 'answerFiles'].some((k) => input[k]?.length);
+const MODEL_PROBLEM = /model_not_found|model.{0,40}(does not exist|not found|decommissioned|deprecated|no longer|not supported|unavailable)|image.{0,40}not supported|does not support (image|vision|multimodal)|not a (vision|multimodal) model|image_url.{0,40}(not|unsupported)|content must be a string/i;
+const NO_VISION =
+  "The AI service connected to this site can't read images at the moment. Type or paste the student's answers instead, or ask the site owner to switch to a service that reads images. [code: no-vision-model]";
+
 async function gradeWithOpenAICompatible(input, env, provider) {
   const cfg = openAICompatibleConfig(env, provider);
   const messages = buildMessages(input);
@@ -458,6 +549,12 @@ async function gradeWithOpenAICompatible(input, env, provider) {
     },
   };
   if (!isReasoningModel(cfg.model.replace(/^openai\//, ''))) body.temperature = 0;
+
+  // A model found automatically earlier replaces a configured one that didn't work.
+  const needImages = hasImages(input);
+  const discoveredKey = `${cfg.label}:${needImages ? 'vision' : 'text'}`;
+  if (cfg.modelsUrl && discoveredModels[discoveredKey]) body.model = cfg.model = discoveredModels[discoveredKey];
+  let modelSwitched = false;
 
   // Output format, stepping down when a service rejects one or returns nothing usable:
   // strict JSON schema → JSON mode with the schema in the prompt → the same prompt without response_format.
@@ -542,6 +639,20 @@ async function gradeWithOpenAICompatible(input, env, provider) {
 
     console.error(`${cfg.label} error (attempt ${attempt}) from ${cfg.url}`, res.status, res.text.slice(0, 800));
     const shape = describeReply(res);
+
+    // The model is missing, retired or can't read images: pick one that works.
+    if ((res.status === 404 || res.status === 400) && MODEL_PROBLEM.test(res.text) && cfg.modelsUrl) {
+      if (!modelSwitched) {
+        modelSwitched = true;
+        const found = await discoverModel(cfg, env, needImages);
+        if (found && found !== body.model) {
+          body.model = cfg.model = found;
+          continue;
+        }
+      }
+      if (needImages) throw new GradingError(NO_VISION, 422);
+      throw fail(FAILED, `model-${res.status}`);
+    }
 
     // Some endpoints don't support strict JSON schemas: fall back to JSON mode with the schema in the prompt.
     if (res.status === 400 && /response_format|json_schema|json_object|structured|json mode|json_validate/i.test(res.text) && nextMode()) {
@@ -648,8 +759,6 @@ async function gradeWithGemini(input, env) {
 
 // On-demand connection test (GET /api/selftest): three tiny requests (plain text, strict JSON schema,
 // an image) against the configured OpenAI-compatible endpoint(s), reporting exactly what came back.
-const TINY_PNG =
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC';
 async function selfTest(env = process.env) {
   const provider = providerName(env);
   if (!['github', 'openai', 'groq', 'openrouter', 'custom'].includes(provider)) {
@@ -760,13 +869,26 @@ async function selfTest(env = process.env) {
       status: r.status,
       count: list.length,
       modelListed: list.some((m) => m.id === cfg.model),
-      canReadImages: visionModels(provider, list),
+      all: provider === 'openrouter' ? undefined : list.map((m) => m.id),
       rawStart: list.length ? '' : text.slice(0, 300),
       ms: Date.now() - started,
     };
+    // Test which models can actually read an image (best-looking first).
+    if (list.length) {
+      const candidates = candidateModels(cfg, list, true).slice(0, provider === 'openrouter' ? 6 : 12);
+      report.imageCheck = [];
+      for (const id of candidates) report.imageCheck.push(await tryModel(cfg, id, true, quickEnv));
+      const working = report.imageCheck.find((x) => x.ok);
+      report.modelThatReadsImages = working ? working.model : 'none';
+      if (working) discoveredModels[`${cfg.label}:vision`] = working.model;
+      if (!report.models.modelListed || !working || working.model !== cfg.model) {
+        if (working) cfg.model = working.model;
+      }
+    }
   } catch (err) {
     report.models = { error: String(err), cause: err?.cause?.code };
   }
+  report.testedModel = cfg.model;
   report.plainTest = await run({}, plain);
   report.schemaTest = await run({}, schema);
   report.imageTest = await run({}, image);
@@ -812,7 +934,7 @@ async function checkProvider(env = process.env) {
         ok: listed || !ids.length,
         message: listed
           ? `${provider} key OK, model "${cfg.model}" available.`
-          : `${provider} key OK, but model "${cfg.model}" is not in the service's model list. Open /api/selftest to see which models can read images.`,
+          : `${provider} key OK. Model "${cfg.model}" isn't offered any more, so the site will pick one that reads images automatically (see /api/selftest).`,
       };
     } catch (err) {
       return { ok: false, message: `${provider} check could not connect: ${err.message}` };
@@ -866,6 +988,7 @@ module.exports = {
   selfTest,
   resetForTests: () => {
     githubVariant = 0;
+    for (const k of Object.keys(discoveredModels)) delete discoveredModels[k];
   },
   GradingError,
   RESULT_SCHEMA,

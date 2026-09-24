@@ -62,7 +62,7 @@ Mark calculator running at http://localhost:10000
 Marking: groq key OK, model "meta-llama/llama-4-scout-17b-16e-instruct" available.
 ```
 - `groq key check failed (HTTP 401)`: the key was pasted wrongly. Fix `GROQ_API_KEY` under **Environment**.
-- `model ... is not in the service's model list`: open the self-test below; it lists the models that can read images. Put one in `GROQ_MODEL`.
+- `Model ... isn't offered any more`: nothing to do. Free services rename models often, so the site tests the service's models and picks one that reads images by itself. The self-test below shows which one it picked; you can fix it with `GROQ_MODEL` if you like.
 
 **Self-test:** open `https://YOUR-SITE.onrender.com/api/selftest`. It sends three tiny requests (plain text, strict answer format, an image) and shows what came back. In a good result, `plainTest.replyText` is `"OK"` and `imageTest` has a status of `200` with a colour word. It uses 3 of the day's requests.
 

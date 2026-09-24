@@ -1,5 +1,5 @@
-// Grading engine. Calls an AI vision model from the server only: Google Gemini (has a free tier)
-// or OpenAI. The browser never sees the provider, the key, or the prompt.
+// Grading engine. Calls an AI vision model from the server only: GitHub Models (free GPT-4.1),
+// Google Gemini (free tier) or OpenAI. The browser never sees the provider, the key, or the prompt.
 
 const RESULT_SCHEMA = {
   type: 'object',
@@ -158,6 +158,7 @@ function normalize(result, teacherTotal) {
   });
   const counted = questions.filter((q) => q.counted);
   const warnings = (result.warnings || []).map(String);
+  if (!questions.length) warnings.push('No questions could be identified. Check the question paper and the photos.');
 
   const fixedTotal = round(teacherTotal);
   const totalMaximum =
@@ -219,6 +220,27 @@ function providerName(env) {
   if (env.GITHUB_MODELS_TOKEN) return 'github';
   if (env.OPENAI_API_KEY) return 'openai';
   return 'none';
+}
+
+// GitHub Models' free tier caps input at ~8000 tokens per request. Estimate before sending so the
+// user gets a clear message instead of a failed marking. Returns an error message or ''.
+const PROMPT_OVERHEAD_TOKENS = 1400; // system prompt + JSON schema + section headings
+const TOKENS_PER_PAGE = 765; // one portrait page at GPT-4.1 "high" detail
+function requestTooLarge(input, env) {
+  if (providerName(env) !== 'github') return '';
+  const budget = Number(env.GITHUB_TOKEN_BUDGET) || 8000;
+  const text = ['subject', 'className', 'totalMarks', 'syllabus', 'scheme', 'extra', 'questionText', 'instructions', 'answerText']
+    .map((k) => String(input.setup[k] || ''))
+    .join('') + instructionText(input.setup);
+  const images = ['syllabusFiles', 'schemeFiles', 'questionFiles', 'answerFiles'].reduce((n, k) => n + (input[k]?.length || 0), 0);
+  const estimate = PROMPT_OVERHEAD_TOKENS + Math.ceil(text.length / 3.5) + images * TOKENS_PER_PAGE;
+  if (estimate <= budget) return '';
+  const spareChars = Math.max(0, Math.floor((budget - PROMPT_OVERHEAD_TOKENS - images * TOKENS_PER_PAGE) * 3.5));
+  return (
+    `This is more than the free marking service can read at once (about ${estimate} of ${budget} units). ` +
+    `With ${images} page image${images === 1 ? '' : 's'}, the typed text (syllabus, scheme, questions, answers) can be about ${spareChars} characters; ` +
+    `it is ${text.length}. Shorten the syllabus (it is optional), keep the scheme to key points, or use fewer page images.`
+  );
 }
 
 // Most pages (question paper + answer sheet) the provider can read in one marking.
@@ -467,6 +489,7 @@ module.exports = {
   instructionText,
   providerName,
   maxPages,
+  requestTooLarge,
   checkProvider,
   GradingError,
   RESULT_SCHEMA,

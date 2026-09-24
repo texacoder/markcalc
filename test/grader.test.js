@@ -188,3 +188,16 @@ test('prompt includes typed answers and scheme/syllabus images in order', () => 
   ]);
   assert.strictEqual(user.content.filter((p) => p.type === 'image_url').length, 4);
 });
+
+const { requestTooLarge } = require('../src/grader');
+
+test('GitHub token budget: small requests pass, oversized ones get a clear message', () => {
+  const env = { GITHUB_MODELS_TOKEN: 'x' };
+  const img = { mimetype: 'image/png', buffer: Buffer.from('x') };
+  assert.strictEqual(requestTooLarge({ setup: { scheme: 'Q1: 5' }, answerFiles: Array(7).fill(img) }, env), '');
+  const msg = requestTooLarge({ setup: { scheme: 'x'.repeat(6000) }, answerFiles: Array(7).fill(img) }, env);
+  assert.match(msg, /more than the free marking service can read/);
+  assert.match(msg, /it is 6000/);
+  // Other providers are not limited this way.
+  assert.strictEqual(requestTooLarge({ setup: { scheme: 'x'.repeat(60000) }, answerFiles: [img] }, { GEMINI_API_KEY: 'g' }), '');
+});

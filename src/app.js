@@ -4,7 +4,7 @@ const path = require('path');
 const express = require('express');
 const multer = require('multer');
 const helmet = require('helmet');
-const { grade, GradingError, providerName, maxPages } = require('./grader');
+const { grade, GradingError, providerName, maxPages, requestTooLarge } = require('./grader');
 
 const MAX_FILE_MB = 10;
 const SETUP_FIELDS = ['subject', 'className', 'totalMarks', 'syllabus', 'scheme', 'extra', 'questionText', 'instructions', 'answerText'];
@@ -43,6 +43,11 @@ function parseJson(value, fallback) {
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
+
+// The visitor's address (used only for the per-device daily limit, never stored).
+function clientIp(req) {
+  return String(req.headers['cf-connecting-ip'] || req.ip || '').trim();
+}
 
 // Daily counters kept in memory only (they reset when the server restarts).
 function dailyCounter() {
@@ -99,7 +104,8 @@ function createApp({ env = process.env } = {}) {
     limits: { fileSize: MAX_FILE_MB * 1024 * 1024, files: 45, fields: 30, fieldSize: 200 * 1024 },
   });
 
-  app.set('trust proxy', 1);
+  // Hosts like Render sit behind more than one proxy; trust them so req.ip is the visitor's address.
+  app.set('trust proxy', true);
   app.disable('x-powered-by');
   app.use(
     helmet({
@@ -116,7 +122,12 @@ function createApp({ env = process.env } = {}) {
   );
 
   app.get('/healthz', (req, res) => res.json({ ok: true, markingConfigured: providerName(env) !== 'none' }));
-  app.use(express.static(path.join(__dirname, '..', 'public'), { maxAge: '1h' }));
+  // Always revalidate the site's own files so a new deploy shows up immediately.
+  app.use(
+    express.static(path.join(__dirname, '..', 'public'), {
+      setHeaders: (res, file) => res.setHeader('Cache-Control', /\.(svg|png)$/.test(file) ? 'public, max-age=86400' : 'no-cache'),
+    }),
+  );
   app.use(
     '/vendor/pdfjs',
     express.static(path.join(path.dirname(require.resolve('pdfjs-dist/package.json')), 'legacy', 'build'), { maxAge: '7d' }),
@@ -138,7 +149,7 @@ function createApp({ env = process.env } = {}) {
   const imageMaxSide = provider === 'gemini' ? 2200 : 1600;
 
   api.get('/config', (req, res) =>
-    res.json({ maxPages: maxPages(env), perDeviceLimit, imageMaxSide, usedToday: usage.get(`ip:${req.ip}`) }),
+    res.json({ maxPages: maxPages(env), perDeviceLimit, imageMaxSide, usedToday: usage.get(`ip:${clientIp(req)}`) }),
   );
 
   api.post(
@@ -167,6 +178,8 @@ function createApp({ env = process.env } = {}) {
       if (!files.questionFiles.length && !setup.questionText.trim() && !files.schemeFiles.length && !setup.scheme.trim()) {
         throw new HttpError(400, 'Please add the question paper (or a marking scheme that includes the questions).');
       }
+      const tooBig = requestTooLarge({ setup, ...files }, env);
+      if (tooBig) throw new HttpError(413, tooBig);
       const pageLimit = maxPages(env);
       const pageCount = Object.values(files).reduce((n, list) => n + list.length, 0);
       if (pageCount > pageLimit) {
@@ -176,7 +189,7 @@ function createApp({ env = process.env } = {}) {
         );
       }
 
-      const ipKey = `ip:${req.ip}`;
+      const ipKey = `ip:${clientIp(req)}`;
       if (usage.get(ipKey) >= perDeviceLimit) {
         throw new HttpError(429, `You've marked ${perDeviceLimit} answer sheets today, which is the daily limit per device. Please try again tomorrow.`);
       }

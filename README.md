@@ -5,9 +5,9 @@ A website that marks answer sheets, for schools, colleges and universities alike
 The teacher or lecturer opens the site and enters:
 1. exam details (subject or paper, class or course, total marks, syllabus),
 2. the marking scheme or answer key,
-3. the question paper (typed, or photos / a PDF),
+3. the question paper,
 4. checking instructions such as *check liberally*, *marks for diagram alone* or *step marks*,
-5. the student's answer sheet (phone photos or a PDF).
+5. the student's answer sheet.
 
 Every input can be **typed or pasted**, or uploaded as a **PDF, photos or a .txt file**. If a PDF already contains typed text, the text is copied into the box for checking, which saves page-image quota. Scanned PDFs and photos are read as images. Answer-sheet PDFs are always read as images, so handwriting and diagrams are kept.
 

@@ -1,0 +1,9 @@
+{
+  "name": "Mark Calculator",
+  "short_name": "Marks",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f6fb",
+  "theme_color": "#3452d6",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

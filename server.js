@@ -1,67 +1,27 @@
-require('dotenv').config();
-const path = require('path');
-const express = require('express');
-const multer = require('multer');
-const { grade, GradingError } = require('./src/grader');
+require('dotenv').config({ quiet: true });
+const { openDb } = require('./src/db');
+const { createApp } = require('./src/app');
 
-const MAX_FILE_MB = 10;
-const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
-const TEXT_FIELDS = ['subject', 'className', 'totalMarks', 'syllabus', 'scheme', 'extra', 'instructions', 'questionText'];
+const port = Number(process.env.PORT) || 3000;
+const dbFile = process.env.DATABASE_FILE || './data/markcalc.db';
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_FILE_MB * 1024 * 1024, files: 30 },
-  fileFilter: (req, file, cb) => {
-    if (ALLOWED_TYPES.has(file.mimetype)) cb(null, true);
-    else cb(new GradingError(`"${file.originalname}" is not a supported image (use JPG, PNG or WEBP).`));
-  },
+if (!process.env.OPENAI_API_KEY && process.env.MOCK_GRADER !== '1') {
+  console.warn('WARNING: OPENAI_API_KEY is not set. Marking will fail until it is configured.');
+}
+
+const db = openDb(dbFile);
+const server = createApp({ db }).listen(port, () => {
+  console.log(`Mark calculator running at http://localhost:${port} (database: ${dbFile})`);
 });
+// Grading several pages can take a few minutes.
+server.requestTimeout = 10 * 60 * 1000;
 
-function createApp() {
-  const app = express();
-  app.use(express.static(path.join(__dirname, 'public')));
-
-  app.post(
-    '/api/grade',
-    upload.fields([
-      { name: 'questionPaper', maxCount: 10 },
-      { name: 'answerSheet', maxCount: 20 },
-    ]),
-    async (req, res, next) => {
-      try {
-        const setup = {};
-        for (const key of TEXT_FIELDS) setup[key] = String(req.body?.[key] ?? '').slice(0, 20000);
-        const questionFiles = req.files?.questionPaper || [];
-        const answerFiles = req.files?.answerSheet || [];
-
-        if (!answerFiles.length) throw new GradingError('Please upload at least one answer sheet image.');
-        if (!questionFiles.length && !setup.questionText.trim()) {
-          throw new GradingError('Please upload the question paper or type the questions.');
-        }
-
-        res.json(await grade({ setup, questionFiles, answerFiles }));
-      } catch (err) {
-        next(err);
-      }
-    },
-  );
-
-  app.use((err, req, res, next) => {
-    if (err instanceof GradingError) return res.status(400).json({ error: err.message });
-    if (err instanceof multer.MulterError) {
-      const msg = err.code === 'LIMIT_FILE_SIZE' ? `Each image must be under ${MAX_FILE_MB} MB.` : 'Upload failed: too many files.';
-      return res.status(400).json({ error: msg });
-    }
-    console.error(err);
-    res.status(500).json({ error: 'Something went wrong while calculating marks. Please try again.' });
+function shutdown() {
+  server.close(() => {
+    db.close();
+    process.exit(0);
   });
-
-  return app;
+  setTimeout(() => process.exit(0), 10000).unref();
 }
-
-if (require.main === module) {
-  const port = process.env.PORT || 3000;
-  createApp().listen(port, () => console.log(`Mark calculator running at http://localhost:${port}`));
-}
-
-module.exports = { createApp };
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

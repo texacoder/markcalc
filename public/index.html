@@ -3,89 +3,36 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Mark students' answer sheets in minutes. Set up the syllabus, marking scheme and your instructions, upload the answer sheet and get marks for every question." />
+  <meta name="theme-color" content="#3452d6" />
   <title>Mark Calculator</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="manifest.webmanifest" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header class="top">
-    <h1>Mark Calculator</h1>
-    <p>Set up the exam once, then upload each student's answer sheet to get their marks.</p>
+  <a class="skip" href="#view">Skip to content</a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#/">
+        <img src="icon.svg" alt="" width="28" height="28" />
+        <span>Mark Calculator</span>
+      </a>
+      <nav id="nav" aria-label="Main"></nav>
+    </div>
   </header>
 
-  <main>
-    <form id="grade-form" novalidate>
-      <section class="card">
-        <h2><span class="step">1</span> Exam setup</h2>
-        <p class="hint">Saved in this browser, so you only fill it once per exam.</p>
-        <div class="row">
-          <label>Subject <input name="subject" placeholder="e.g. Physics" /></label>
-          <label>Class / grade <input name="className" placeholder="e.g. Class 10" /></label>
-          <label class="narrow">Total marks <input name="totalMarks" type="number" min="1" placeholder="e.g. 50" /></label>
-        </div>
-        <label>Syllabus
-          <textarea name="syllabus" rows="4" placeholder="Chapters / topics covered in this exam"></textarea>
-        </label>
-        <label>Marking scheme / answer key
-          <textarea name="scheme" rows="6" placeholder="Q1 (5 marks): definition – 2, example – 1, diagram – 2&#10;Q2 (10 marks): ..."></textarea>
-        </label>
-        <label>Anything else needed (optional)
-          <textarea name="extra" rows="2" placeholder="e.g. Section B has internal choice; answer any 4 of 6"></textarea>
-        </label>
-      </section>
-
-      <section class="card">
-        <h2><span class="step">2</span> Question paper</h2>
-        <div class="drop" data-input="questionPaper">
-          <input type="file" id="questionPaper" name="questionPaper" accept="image/*" multiple />
-          <label for="questionPaper" class="drop-label">
-            <strong>Upload question paper images</strong>
-            <span>JPG / PNG, one image per page</span>
-          </label>
-          <div class="thumbs" id="questionPaper-thumbs"></div>
-        </div>
-        <details>
-          <summary>Or type the questions instead</summary>
-          <textarea name="questionText" rows="5" placeholder="Q1. Define Newton's first law. (5)"></textarea>
-        </details>
-      </section>
-
-      <section class="card">
-        <h2><span class="step">3</span> Answer sheet</h2>
-        <div class="drop" data-input="answerSheet">
-          <input type="file" id="answerSheet" name="answerSheet" accept="image/*" multiple />
-          <label for="answerSheet" class="drop-label">
-            <strong>Upload the student's answer sheet</strong>
-            <span>All pages, in order. Photos from a phone are fine.</span>
-          </label>
-          <div class="thumbs" id="answerSheet-thumbs"></div>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2><span class="step">4</span> Checking instructions</h2>
-        <div class="chips">
-          <label class="chip"><input type="checkbox" name="preset" value="Check liberally; give benefit of the doubt for partially correct answers." /> Check liberally</label>
-          <label class="chip"><input type="checkbox" name="preset" value="Check strictly; award marks only for fully correct points." /> Check strictly</label>
-          <label class="chip"><input type="checkbox" name="preset" value="Award marks for diagrams even when the written explanation is missing." /> Marks for diagram only</label>
-          <label class="chip"><input type="checkbox" name="preset" value="Give step marks for correct method even if the final answer is wrong." /> Step marks</label>
-          <label class="chip"><input type="checkbox" name="preset" value="Ignore spelling and grammar mistakes." /> Ignore spelling</label>
-          <label class="chip"><input type="checkbox" name="preset" value="Do not give half marks; whole numbers only." /> No half marks</label>
-        </div>
-        <label>Your own instructions
-          <textarea name="instructions" rows="3" placeholder="e.g. Deduct 1 mark if units are missing in numericals"></textarea>
-        </label>
-      </section>
-
-      <div class="actions">
-        <button type="submit" id="submit">Calculate marks</button>
-        <button type="button" id="next-student" class="secondary" hidden>Next student</button>
-      </div>
-      <p id="error" class="error" role="alert" hidden></p>
-    </form>
-
-    <section id="result" class="card result" hidden aria-live="polite"></section>
+  <main id="view" tabindex="-1">
+    <noscript><p>Please enable JavaScript to use Mark Calculator.</p></noscript>
   </main>
 
-  <script src="app.js"></script>
+  <footer class="footer no-print">
+    <span>Mark Calculator · Marks are suggestions. The teacher has the final say.</span>
+  </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="print-area"></div>
+
+  <script type="module" src="js/app.js"></script>
 </body>
 </html>

@@ -1,0 +1,29 @@
+# One-click deploy on Render: https://render.com/deploy
+# Render asks for OPENAI_API_KEY (and optionally SIGNUP_CODE) during setup.
+services:
+  - type: web
+    name: markcalc
+    runtime: node
+    plan: starter # a persistent disk needs a paid instance; the free plan loses data on every restart
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_FILE
+        value: /var/data/markcalc.db
+      - key: OPENAI_MODEL
+        value: gpt-4.1
+      - key: DAILY_GRADING_LIMIT
+        value: "60"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SIGNUP_CODE
+        sync: false
+    disk:
+      name: markcalc-data
+      mountPath: /var/data
+      sizeGB: 1

@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "reset-password": "node scripts/reset-password.js"
   },
   "repository": {
     "type": "git",
@@ -22,10 +23,12 @@
   "dependencies": {
     "dotenv": "^18.0.3",
     "express": "^5.2.1",
-    "multer": "^2.4.0"
+    "helmet": "^8.3.0",
+    "multer": "^2.4.0",
+    "pdfjs-dist": "^6.3.289"
   },
   "private": true,
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13"
   }
 }

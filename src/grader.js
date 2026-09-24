@@ -271,12 +271,29 @@ async function postJson(url, headers, body, env) {
 }
 
 function parseResultText(text) {
+  // Tolerate a reply wrapped in ```json fences or with text around the JSON object.
+  const raw = String(text).trim();
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
   try {
-    return JSON.parse(text);
+    return JSON.parse(start >= 0 && end > start ? raw.slice(start, end + 1) : raw);
   } catch {
-    throw new GradingError('The marking result was incomplete. Please try again.');
+    console.error('Unparseable marking reply:', raw.slice(0, 500));
+    throw new GradingError('The marking result was incomplete. Please try again. [code: parse]');
   }
 }
+
+// Text of a chat message whose content may be a string or a list of parts.
+function messageText(message) {
+  const c = message?.content;
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) return c.map((p) => (typeof p === 'string' ? p : p?.text || '')).join('');
+  return '';
+}
+
+const FILTERED =
+  "The marking service's automatic safety filter stopped this request. This sometimes happens by mistake. Please try again. [code: filter]";
+const DECLINED = 'The marking service declined to mark this sheet. Please try again. [code: declined]';
 
 // ---------------- OpenAI ----------------
 
@@ -324,25 +341,58 @@ async function gradeWithOpenAICompatible(input, env, provider) {
   };
   if (!isReasoningModel(cfg.model.replace(/^openai\//, ''))) body.temperature = 0;
 
-  let schemaFallbackUsed = false;
+  // JSON mode with the schema written into the prompt: used when strict schemas are rejected
+  // or produce an empty reply.
+  let jsonModeUsed = false;
+  const useJsonMode = () => {
+    jsonModeUsed = true;
+    body.response_format = { type: 'json_object' };
+    messages[0] = {
+      role: 'system',
+      content: `${SYSTEM_PROMPT}\n\nReply with ONLY a JSON object (no other text) that matches this JSON Schema:\n${JSON.stringify(RESULT_SCHEMA)}`,
+    };
+  };
+
   for (let attempt = 1; ; attempt++) {
     const res = await postJson(cfg.url, { Authorization: `Bearer ${cfg.key}` }, body, env);
     if (res.ok) {
-      const message = res.json?.choices?.[0]?.message;
-      if (!message || message.refusal || !message.content) throw new GradingError(UNREADABLE, 422);
-      return parseResultText(message.content);
+      const choice = res.json?.choices?.[0];
+      const message = choice?.message;
+      const text = messageText(message);
+      if (text && !message?.refusal) return parseResultText(text);
+
+      // A reply without usable content: record why, then retry once in JSON mode.
+      const reason = choice?.finish_reason || 'none';
+      console.error(
+        `${cfg.label}: reply had no marks (attempt ${attempt})`,
+        JSON.stringify({
+          finish_reason: reason,
+          refusal: message?.refusal || null,
+          content_filter_results: choice?.content_filter_results,
+          prompt_filter_results: res.json?.prompt_filter_results,
+          model: res.json?.model,
+          usage: res.json?.usage,
+        }).slice(0, 2000),
+      );
+      if (!jsonModeUsed) {
+        useJsonMode();
+        continue;
+      }
+      if (reason === 'content_filter') throw new GradingError(FILTERED, 422);
+      if (message?.refusal) throw new GradingError(DECLINED, 422);
+      if (reason === 'length') throw new GradingError(`${TOO_BIG} [code: length]`, 413);
+      throw new GradingError(`${UNREADABLE} [code: empty-${reason}]`, 422);
     }
     console.error(`${cfg.label} error (attempt ${attempt})`, res.status, res.text.slice(0, 800));
 
     // Some endpoints don't support strict JSON schemas: fall back to JSON mode with the schema in the prompt.
-    if (res.status === 400 && !schemaFallbackUsed && /response_format|json_schema|structured/i.test(res.text)) {
-      schemaFallbackUsed = true;
-      body.response_format = { type: 'json_object' };
-      messages[0] = {
-        role: 'system',
-        content: `${SYSTEM_PROMPT}\n\nReply with ONLY a JSON object that matches this JSON Schema:\n${JSON.stringify(RESULT_SCHEMA)}`,
-      };
+    if (res.status === 400 && !jsonModeUsed && /response_format|json_schema|structured/i.test(res.text)) {
+      useJsonMode();
       continue;
+    }
+    if (res.status === 400 && /content_filter|ResponsibleAIPolicyViolation|content management policy/i.test(res.text)) {
+      if (attempt < 2) continue;
+      throw new GradingError(FILTERED, 422);
     }
     if (res.status === 413 || /tokens_limit_reached|too large|maximum context|max.*tokens/i.test(res.text)) {
       throw new GradingError(TOO_BIG, 413);
@@ -356,8 +406,11 @@ async function gradeWithOpenAICompatible(input, env, provider) {
       continue;
     }
     if (res.status === 429) throw new GradingError(BUSY, 503);
-    if (res.status === 401 || res.status === 403) console.error(`${cfg.label}: the key/token is invalid or lacks permission.`);
-    throw new GradingError(FAILED);
+    if (res.status === 401 || res.status === 403) {
+      console.error(`${cfg.label}: the key/token is invalid or lacks permission.`);
+      throw new GradingError(`${FAILED} [code: auth-${res.status}]`);
+    }
+    throw new GradingError(`${FAILED} [code: http-${res.status}]`);
   }
 }
 
@@ -395,12 +448,18 @@ async function gradeWithGemini(input, env) {
 
     if (res.ok) {
       const candidate = res.json?.candidates?.[0];
-      if (res.json?.promptFeedback?.blockReason || !candidate) throw new GradingError(UNREADABLE, 422);
+      if (res.json?.promptFeedback?.blockReason || !candidate) {
+        console.error('Gemini: blocked or empty reply', JSON.stringify(res.json?.promptFeedback || res.json).slice(0, 1500));
+        throw new GradingError(FILTERED, 422);
+      }
       const text = (candidate.content?.parts || [])
         .filter((p) => !p.thought && typeof p.text === 'string')
         .map((p) => p.text)
         .join('');
-      if (!text) throw new GradingError(UNREADABLE, 422);
+      if (!text) {
+        console.error('Gemini: reply had no text', JSON.stringify({ finishReason: candidate.finishReason, safetyRatings: candidate.safetyRatings }).slice(0, 1500));
+        throw new GradingError(`${UNREADABLE} [code: empty-${candidate.finishReason || 'none'}]`, 422);
+      }
       if (candidate.finishReason === 'MAX_TOKENS') {
         throw new GradingError('The answer sheet is too long to mark in one go. Try fewer pages.', 422);
       }

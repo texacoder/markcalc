@@ -201,3 +201,38 @@ test('GitHub token budget: small requests pass, oversized ones get a clear messa
   // Other providers are not limited this way.
   assert.strictEqual(requestTooLarge({ setup: { scheme: 'x'.repeat(60000) }, answerFiles: [img] }, { GEMINI_API_KEY: 'g' }), '');
 });
+
+test('GitHub Models: empty reply is retried in JSON mode; fenced JSON is accepted', async (t) => {
+  const bodies = [];
+  const replies = [
+    Response.json({ choices: [{ finish_reason: 'stop', message: { content: null } }] }),
+    Response.json({ choices: [{ finish_reason: 'stop', message: { content: '```json\n' + JSON.stringify(GOOD) + '\n```' } }] }),
+  ];
+  t.mock.method(globalThis, 'fetch', async (url, init) => { bodies.push(JSON.parse(init.body)); return replies.shift(); });
+  t.mock.method(console, 'error', () => {});
+  const r = await grade(INPUT, { GITHUB_MODELS_TOKEN: 't' });
+  assert.strictEqual(r.totalAwarded, 6);
+  assert.strictEqual(bodies[0].response_format.type, 'json_schema');
+  assert.strictEqual(bodies[1].response_format.type, 'json_object');
+});
+
+test('GitHub Models: refusals and content filters give specific messages', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  t.mock.method(globalThis, 'fetch', async () =>
+    Response.json({ choices: [{ finish_reason: 'stop', message: { content: null, refusal: "I'm sorry, I can't help with that." } }] }),
+  );
+  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: declined\]/);
+
+  t.mock.method(globalThis, 'fetch', async () =>
+    Response.json({ choices: [{ finish_reason: 'content_filter', message: { content: null } }] }),
+  );
+  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: filter\]/);
+
+  t.mock.method(globalThis, 'fetch', async () =>
+    Response.json({ error: { code: 'content_filter', message: 'filtered by content management policy' } }, { status: 400 }),
+  );
+  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: filter\]/);
+
+  t.mock.method(globalThis, 'fetch', async () => new Response('bad credentials', { status: 401 }));
+  await assert.rejects(grade(INPUT, { GITHUB_MODELS_TOKEN: 't' }), /\[code: auth-401\]/);
+});

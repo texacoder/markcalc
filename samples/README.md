@@ -44,3 +44,15 @@ Each marking uses only **1 page image**. The question paper and scheme are typed
 
 ## Quick connection test (no photo)
 Total marks `2` · Marking scheme `Q1: Paris (2)` · Question `Q1. What is the capital of France? (2)` · *Or type / paste the student's answers*: `Q1. Paris` → you should get **2 / 2**.
+
+## First trial result
+
+Run on the live site with the free Groq service (a Qwen vision model, chosen automatically), with **Step marks** and **Ignore spelling & grammar** ticked:
+
+| Sheet | Teacher | Mark Calculator | Difference |
+|---|---|---|---|
+| Priya (good) | 19 | 18 | −1 |
+| Rahul (average) | 11 | 10 | −1 |
+| Anu (weak) | 3 | 3 | 0 |
+
+All three are within ±1 mark, with an average difference of about 0.7 marks. The site marked slightly more strictly than the answer key. These sheets use a handwriting-style font, so the next check is real handwritten sheets.

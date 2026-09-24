@@ -372,12 +372,12 @@ function createApp({ db, env = process.env }) {
       await saveResultRow(t, lastInsertRowid, result, false);
       await t.run(
         `INSERT INTO usage (user_id, day, count) VALUES (?, ?, 1)
-         ON CONFLICT(user_id, day) DO UPDATE SET count = count + 1`,
+         ON CONFLICT(user_id, day) DO UPDATE SET count = usage.count + 1`,
         req.user.id,
         today(),
       );
       await t.run(
-        `INSERT INTO site_usage (day, count) VALUES (?, 1) ON CONFLICT(day) DO UPDATE SET count = count + 1`,
+        `INSERT INTO site_usage (day, count) VALUES (?, 1) ON CONFLICT(day) DO UPDATE SET count = site_usage.count + 1`,
         today(),
       );
       return lastInsertRowid;

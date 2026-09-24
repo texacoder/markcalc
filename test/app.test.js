@@ -21,11 +21,19 @@ function png() {
 }
 
 async function startServer(env = {}) {
-  const db = await openDb({ url: ':memory:' });
+  // Set TEST_DATABASE_URL=postgres://… to run the same tests against Postgres.
+  const url = process.env.TEST_DATABASE_URL || ':memory:';
+  if (url.startsWith('postgres')) {
+    const pg = new (require('pg').Client)({ connectionString: url });
+    await pg.connect();
+    await pg.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+    await pg.end();
+  }
+  const db = await openDb({ url });
   const server = createApp({ db, env: { MOCK_GRADER: '1', ...env } }).listen(0);
   await new Promise((r) => server.once('listening', r));
   const base = `http://localhost:${server.address().port}`;
-  return { base, db, close: () => server.close() };
+  return { base, db, close: () => { server.close(); db.close(); } };
 }
 
 function client(base) {

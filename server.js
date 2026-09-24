@@ -18,7 +18,8 @@ const dbUrl = process.env.DATABASE_URL || 'file:./data/markcalc.db';
     throw new Error(`Could not open the database (${err.message}). Check DATABASE_URL and DATABASE_AUTH_TOKEN.`);
   });
   const server = createApp({ db }).listen(port, () => {
-    console.log(`Mark calculator running at http://localhost:${port} (database: ${dbUrl.split('?')[0]})`);
+    const safeUrl = dbUrl.split('?')[0].replace(/\/\/[^@/]*@/, '//***@');
+    console.log(`Mark calculator running at http://localhost:${port} (database: ${safeUrl})`);
   });
   // Marking several pages can take a few minutes.
   server.requestTimeout = 10 * 60 * 1000;

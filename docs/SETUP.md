@@ -5,15 +5,15 @@ About **15 minutes**, **no credit card**, no coding, and **no Google account nee
 | What | Service | Cost |
 |---|---|---|
 | The AI that reads and marks answer sheets | **GitHub Models** (OpenAI GPT-4.1, the model behind ChatGPT) | Free |
-| The database (teachers, exams, results) | Turso | Free plan |
+| The database (teachers, exams, results) | Neon or Turso | Free plan |
 | The website | Render | Free plan |
 
 Keep a notepad open. You'll collect these values:
 
 ```
 GITHUB_MODELS_TOKEN = github_pat_...
-DATABASE_URL        = libsql://....turso.io
-DATABASE_AUTH_TOKEN = eyJ...
+DATABASE_URL        = postgresql://... (Neon)  or  libsql://... (Turso)
+DATABASE_AUTH_TOKEN = eyJ...  (Turso only)
 SIGNUP_CODE         = (a code you make up, e.g. SUNRISE2026)
 ```
 
@@ -33,12 +33,24 @@ Keep it private. It only goes into Render in Step 3.
 
 ---
 
-## Step 2: Free database (Turso), 5 minutes
+## Step 2: Free database, 5 minutes
 
-1. Go to **<https://turso.tech>** → **Sign up** → **Continue with GitHub**.
-2. In the dashboard, click **Create Database**. Name it `markcalc`, pick the location nearest to you, and create it.
-3. Open the database and copy its **URL** (looks like `libsql://markcalc-yourname.turso.io`). This is your **DATABASE_URL**.
-4. On the same page, click **Create Token** (or *Generate token*). Choose *no expiration* and *read & write*, then copy it. This is your **DATABASE_AUTH_TOKEN**.
+Pick **one**. Both are free and sign in with GitHub. If one website doesn't open for you, use the other.
+
+### Option A: Neon (Postgres)
+1. Go to **<https://neon.tech>** → **Sign up** → **Continue with GitHub**.
+2. Create a project: name it `markcalc`, pick the region nearest to you, and leave everything else as it is.
+3. On the project dashboard, click **Connect** (or find *Connection string*).
+4. Copy the connection string. It looks like
+   `postgresql://neondb_owner:xxxx@ep-something.region.aws.neon.tech/neondb?sslmode=require`
+   This is your **DATABASE_URL**. Make sure the password is shown in it, not `****`; click *Show password* if needed.
+5. With Neon, leave **DATABASE_AUTH_TOKEN** empty.
+
+### Option B: Turso
+1. Go to **<https://turso.tech>** (dashboard: <https://app.turso.tech>) → **Continue with GitHub**.
+2. **Create Database** → name `markcalc` → nearest location.
+3. Copy the database **URL** (`libsql://markcalc-yourname.turso.io`). This is your **DATABASE_URL**.
+4. Click **Create Token** (no expiration, read & write) and copy it. This is your **DATABASE_AUTH_TOKEN**.
 
 The website creates its tables by itself.
 
@@ -51,7 +63,8 @@ The website creates its tables by itself.
 3. Render shows the **markcalc** service on the **Free** plan and asks for values:
    - `GITHUB_MODELS_TOKEN`: from Step 1
    - `GEMINI_API_KEY`: **leave empty**
-   - `DATABASE_URL`, `DATABASE_AUTH_TOKEN`: from Step 2
+   - `DATABASE_URL`: from Step 2
+   - `DATABASE_AUTH_TOKEN`: from Step 2 if you used Turso, or **leave empty** for Neon
    - `SIGNUP_CODE`: a code only your teachers know (recommended), or leave empty so anyone can sign up
 4. Click **Apply / Deploy Blueprint** and wait 3–5 minutes until it says **Live**.
 5. Click the link at the top (like **https://markcalc.onrender.com**). **That's your website.**
@@ -92,7 +105,7 @@ You don't have to change any code. Just swap the key in Render → **Environment
 If more than one key is set, the site uses Gemini first, then GitHub, then OpenAI, unless `AI_PROVIDER` says otherwise.
 
 ### Privacy
-Answer-sheet photos are sent to the AI service to calculate the marks and are **not stored** by the website. Question papers, schemes and results are stored in your Turso database. Mention this in your school's privacy notice.
+Answer-sheet photos are sent to the AI service to calculate the marks and are **not stored** by the website. Question papers, schemes and results are stored in your database (Neon or Turso). Mention this in your school's privacy notice.
 
 ---
 
@@ -106,8 +119,8 @@ Answer-sheet photos are sent to the AI service to calculate the marks and are **
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | – / `gpt-4.1` | OpenAI directly (optional, paid). |
 | `AI_PROVIDER` | automatic | Force `github`, `gemini` or `openai`. |
 | `MAX_PAGES` | 7 for GitHub, 40 otherwise | Pages per marking (question paper + answer sheet). |
-| `DATABASE_URL` | `file:./data/markcalc.db` | Turso URL (`libsql://…`). On Render free it **must** be Turso, or data is lost on restart. |
-| `DATABASE_AUTH_TOKEN` | – | Turso token. |
+| `DATABASE_URL` | `file:./data/markcalc.db` | Neon/Postgres (`postgresql://…`) or Turso (`libsql://…`). On Render free it **must** be one of these, or data is lost on restart. |
+| `DATABASE_AUTH_TOKEN` | – | Turso token (not used for Neon). |
 | `SIGNUP_CODE` | empty | Teachers need this code to sign up. |
 | `DAILY_GRADING_LIMIT` | `40` | Answer sheets per teacher per day. |
 | `SITE_DAILY_LIMIT` | `0` (off) | Answer sheets for the whole site per day. |
@@ -115,8 +128,8 @@ Answer-sheet photos are sent to the AI service to calculate the marks and are **
 
 ## Looking after the site
 
-- **Updates:** every push to the repository's default branch redeploys automatically. Data stays in Turso.
+- **Updates:** every push to the repository's default branch redeploys automatically. Data stays in your database.
 - **Forgotten teacher password:** on your computer, put the same `DATABASE_URL` and `DATABASE_AUTH_TOKEN` in `.env`, then run
   `npm run reset-password -- teacher@school.com NewPassword123`
-- **Backups:** the Turso dashboard can create a backup or branch of the database at any time.
+- **Backups:** Neon and Turso both keep automatic history, and you can create a branch or backup from their dashboards.
 - **Own domain (optional):** Render → service → **Settings → Custom Domains**.

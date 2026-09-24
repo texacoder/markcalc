@@ -16,7 +16,7 @@ Marking is done by an AI vision model **on the server**: OpenAI's GPT-4.1 throug
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/texacoder/markcalc)
 
-Everything runs on free plans: GitHub Models (AI), Turso (database) and Render (website), all with your GitHub login. Follow **[docs/SETUP.md](docs/SETUP.md)**. It takes about 15 minutes and no credit card.
+Everything runs on free plans: GitHub Models (AI), Neon or Turso (database) and Render (website), all with your GitHub login. Follow **[docs/SETUP.md](docs/SETUP.md)**. It takes about 15 minutes and no credit card.
 
 ## Features
 
@@ -41,7 +41,7 @@ cp .env.example .env     # put a GITHUB_MODELS_TOKEN (or GEMINI_API_KEY / OPENAI
 npm start                # open http://localhost:3000
 ```
 
-Locally, data is stored in `data/markcalc.db`. Set `DATABASE_URL` to use a Turso database instead.
+Locally, data is stored in `data/markcalc.db`. Set `DATABASE_URL` to a Postgres (Neon, Supabase) or Turso URL to use a hosted database instead.
 
 No key yet? Set `MOCK_GRADER=1` in `.env` to try the whole app with fake marks.
 
@@ -52,7 +52,7 @@ server.js            starts the server (reads .env, opens the database)
 src/app.js           Express routes: auth, exams, grading, results, CSV
 src/grader.js        prompt, GitHub Models / Gemini / OpenAI calls (structured JSON, retries, quota handling), mark normalisation
 src/auth.js          password hashing, sessions, rate limiting
-src/db.js            SQLite schema via libSQL (local file or Turso)
+src/db.js            schema + storage: SQLite file, Turso, or Postgres (Neon/Supabase)
 public/              the website (no build step)
   js/app.js          screens: login, exams, editor, marking, results, help
   js/pages.js        page picker (upload / camera / reorder)

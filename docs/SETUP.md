@@ -4,7 +4,7 @@ No login, no database and no credit card are needed. You need two free things:
 
 | What | Service | Cost |
 |---|---|---|
-| The AI that reads and marks answer sheets | **Groq** (Llama 4 vision model) | Free |
+| The AI that reads and marks answer sheets | **Groq** (a vision model such as Qwen, picked automatically) | Free |
 | The website | **Render** | Free plan |
 
 Nothing is stored anywhere. The question paper and answer sheet are sent to the AI, the marks come back, and everything is thrown away.
@@ -59,12 +59,12 @@ Nothing is stored anywhere. The question paper and answer sheet are sent to the 
 Render → your service → **Logs**. You should see:
 ```
 Mark calculator running at http://localhost:10000
-Marking: groq key OK, model "meta-llama/llama-4-scout-17b-16e-instruct" available.
+Marking: groq key OK (11 models). A model that reads images will be chosen automatically on the first marking.
 ```
 - `groq key check failed (HTTP 401)`: the key was pasted wrongly. Fix `GROQ_API_KEY` under **Environment**.
 - `Model ... isn't offered any more`: nothing to do. Free services rename models often, so the site tests the service's models and picks one that reads images by itself. The self-test below shows which one it picked; you can fix it with `GROQ_MODEL` if you like.
 
-**Self-test:** open `https://YOUR-SITE.onrender.com/api/selftest`. It sends three tiny requests (plain text, strict answer format, an image) and shows what came back. In a good result, `plainTest.replyText` is `"OK"` and `imageTest` has a status of `200` with a colour word. It uses 3 of the day's requests.
+**Self-test:** open `https://YOUR-SITE.onrender.com/api/selftest`. It sends three tiny requests (plain text, strict answer format, an image) and shows what came back. In a good result, `modelThatReadsImages` names a model, `plainTest.replyText` contains `OK`, and `imageTest` has a status of `200`. It uses about 10 of the day's requests.
 
 ### B. Quick test with a simple paper (5 minutes)
 Use something you can check easily:
@@ -108,15 +108,14 @@ Free limits are set by each service and can change.
 ### Need more?
 Swap the key in Render → **Environment**. No code changes are needed:
 - **Google Gemini (free, better at handwriting, 40 pages per marking):** create a project at <https://console.cloud.google.com/projectcreate>, get a key at <https://aistudio.google.com/app/apikey>, and set `GEMINI_API_KEY`.
-- **A stronger Groq model:** set `GROQ_MODEL=meta-llama/llama-4-maverick-17b-128e-instruct` (smaller free per-minute limit).
 - **OpenAI directly (paid, about 3–6 cents per sheet):** set `OPENAI_API_KEY` and `AI_PROVIDER=openai`.
 
 ## Settings reference (Render → Environment)
 
 | Variable | Default | What it does |
 |---|---|---|
-| `GROQ_API_KEY` / `GROQ_MODEL` | – / `meta-llama/llama-4-scout-17b-16e-instruct` | Groq (free). |
-| `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` | – / `meta-llama/llama-4-maverick:free` | OpenRouter (free models). |
+| `GROQ_API_KEY` / `GROQ_MODEL` | – / automatic | Groq (free). With no model set, the site tests Groq's models and uses one that reads images. |
+| `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` | – / automatic | OpenRouter (free models; picks a free one that reads images). |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | – / `gemini-flash-latest` | Google Gemini (free tier). |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | – / `gpt-4.1` | OpenAI (paid). |
 | `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL` | – | Any other OpenAI-compatible service. |

@@ -18,7 +18,7 @@ They click **Calculate marks** and get:
 
 Any mark can be corrected. **Mark the next student** keeps the exam details, so a whole class can be marked in a row, and the results list can be downloaded as CSV/Excel. When the page is closed, everything is gone.
 
-Marking is done by an AI vision model **on the server**: Llama 4 on Groq (free), OpenRouter's free models, Google Gemini (free tier), or OpenAI (paid). Users never see the provider, the key or the prompt.
+Marking is done by an AI vision model **on the server**: a vision model on Groq (free, picked automatically), OpenRouter's free models, Google Gemini (free tier), or OpenAI (paid). Users never see the provider, the key or the prompt.
 
 ## Put it online for free
 

@@ -146,7 +146,8 @@ function createApp({ env = process.env } = {}) {
 
   const provider = providerName(env);
   // Images larger than this add upload time without helping the model read them.
-  const imageMaxSide = provider === 'gemini' ? 2200 : 1600;
+  // Groq/OpenRouter models count image size heavily against small free per-minute limits.
+  const imageMaxSide = provider === 'gemini' ? 2200 : ['groq', 'openrouter', 'custom'].includes(provider) ? 1280 : 1600;
 
   api.get('/config', (req, res) =>
     res.json({ maxPages: maxPages(env), perDeviceLimit, imageMaxSide, usedToday: usage.get(`ip:${clientIp(req)}`) }),

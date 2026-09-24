@@ -327,8 +327,12 @@ function replyText(res) {
 }
 
 function parseResultText(text) {
-  // Tolerate a reply wrapped in ```json fences or with text around the JSON object.
-  const raw = String(text).trim();
+  // Tolerate a reply wrapped in ```json fences, with text around the JSON object, or with the
+  // model's reasoning in <think>…</think> first (Qwen and other "thinking" models).
+  const raw = String(text)
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/^[\s\S]*<\/think>/i, '')
+    .trim();
   const start = raw.indexOf('{');
   const end = raw.lastIndexOf('}');
   try {
@@ -391,7 +395,8 @@ function openAICompatibleConfig(env, provider) {
       url: 'https://api.groq.com/openai/v1/chat/completions',
       modelsUrl: 'https://api.groq.com/openai/v1/models',
       key: env.GROQ_API_KEY,
-      model: env.GROQ_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct',
+      // No fixed default: Groq retires models often, so one that reads images is picked automatically.
+      model: env.GROQ_MODEL || '',
       maxTokensField: 'max_completion_tokens',
       maxTokens: 4000,
     };
@@ -402,7 +407,7 @@ function openAICompatibleConfig(env, provider) {
       url: 'https://openrouter.ai/api/v1/chat/completions',
       modelsUrl: 'https://openrouter.ai/api/v1/models',
       key: env.OPENROUTER_API_KEY,
-      model: env.OPENROUTER_MODEL || 'meta-llama/llama-4-maverick:free',
+      model: env.OPENROUTER_MODEL || '',
       headers: { 'HTTP-Referer': env.SITE_URL || 'https://github.com/texacoder/markcalc', 'X-Title': 'Mark Calculator' },
       maxTokensField: 'max_tokens',
       maxTokens: 4000,
@@ -445,9 +450,9 @@ function visionModels(provider, list) {
   return list.map((m) => m.id).filter((id) => /vision|llama-4|scout|maverick|gpt-4\.1|gpt-4o|gpt-5|pixtral|gemma-3|qwen.*vl/i.test(id)).slice(0, 15);
 }
 
-// A 1×1 red PNG used to test whether a model can read images.
+// A 64×64 red PNG used to test whether a model can read images (some models reject images under 32 px).
 const TINY_PNG =
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC';
+  'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeUlEQVR4nO3PQQkAMAzAwCqpf1ETMxF7HINABFzm7H7dcEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFj13PLIEAOXyUUwAAAABJRU5ErkJggg==';
 
 // ---------------- choosing a model automatically ----------------
 // Free services rename and retire models often. When the configured model is missing or can't read
@@ -556,6 +561,24 @@ async function gradeWithOpenAICompatible(input, env, provider) {
   if (cfg.modelsUrl && discoveredModels[discoveredKey]) body.model = cfg.model = discoveredModels[discoveredKey];
   let modelSwitched = false;
 
+  // Qwen 3 models on Groq think out loud by default, which can use up the reply length; turn that off.
+  let reasoningParamRejected = false;
+  const tuneForModel = () => {
+    if (provider === 'groq' && /qwen3/i.test(body.model) && !reasoningParamRejected) body.reasoning_effort = 'none';
+    else delete body.reasoning_effort;
+  };
+  // No model configured: pick one before the first request.
+  if (!body.model && cfg.modelsUrl) {
+    const found = await discoverModel(cfg, env, needImages);
+    if (!found) {
+      if (needImages) throw new GradingError(NO_VISION, 422);
+      throw new GradingError(`${FAILED} [code: no-model]`);
+    }
+    body.model = cfg.model = found;
+    modelSwitched = true;
+  }
+  tuneForModel();
+
   // Output format, stepping down when a service rejects one or returns nothing usable:
   // strict JSON schema → JSON mode with the schema in the prompt → the same prompt without response_format.
   let mode = 'schema';
@@ -640,6 +663,12 @@ async function gradeWithOpenAICompatible(input, env, provider) {
     console.error(`${cfg.label} error (attempt ${attempt}) from ${cfg.url}`, res.status, res.text.slice(0, 800));
     const shape = describeReply(res);
 
+    if (res.status === 400 && body.reasoning_effort && /reasoning/i.test(res.text)) {
+      reasoningParamRejected = true;
+      tuneForModel();
+      continue;
+    }
+
     // The model is missing, retired or can't read images: pick one that works.
     if ((res.status === 404 || res.status === 400) && MODEL_PROBLEM.test(res.text) && cfg.modelsUrl) {
       if (!modelSwitched) {
@@ -647,6 +676,7 @@ async function gradeWithOpenAICompatible(input, env, provider) {
         const found = await discoverModel(cfg, env, needImages);
         if (found && found !== body.model) {
           body.model = cfg.model = found;
+          tuneForModel();
           continue;
         }
       }
@@ -930,6 +960,9 @@ async function checkProvider(env = process.env) {
         ids = (JSON.parse(text).data || []).map((m) => m.id);
       } catch {}
       const listed = ids.includes(cfg.model);
+      if (!cfg.model) {
+        return { ok: true, message: `${provider} key OK (${ids.length} models). A model that reads images will be chosen automatically on the first marking.` };
+      }
       return {
         ok: listed || !ids.length,
         message: listed

@@ -315,11 +315,11 @@ test('Groq / OpenRouter: chosen over the GitHub token, right limits and request 
     Response.json({ choices: [{ finish_reason: 'stop', message: { content: 'Here you go:\n' + JSON.stringify(GOOD) } }] }),
   ];
   t.mock.method(globalThis, 'fetch', async (url, init) => { calls.push({ url, body: JSON.parse(init.body), headers: init.headers }); return replies.shift(); });
-  const r = await grade(INPUT, { GROQ_API_KEY: 'q', GITHUB_MODELS_TOKEN: 'g' });
+  const r = await grade(INPUT, { GROQ_API_KEY: 'q', GITHUB_MODELS_TOKEN: 'g', GROQ_MODEL: 'some/vision-model' });
   assert.strictEqual(r.totalAwarded, 6);
   assert.strictEqual(calls[0].url, 'https://api.groq.com/openai/v1/chat/completions');
   assert.strictEqual(calls[0].headers.Authorization, 'Bearer q');
-  assert.strictEqual(calls[0].body.model, 'meta-llama/llama-4-scout-17b-16e-instruct');
+  assert.strictEqual(calls[0].body.model, 'some/vision-model');
   assert.strictEqual(calls[0].body.max_completion_tokens, 4000);
   assert.strictEqual(calls[0].body.response_format.type, 'json_schema');
   assert.strictEqual(calls[1].body.response_format.type, 'json_object');
@@ -369,11 +369,12 @@ test('marking replaces a retired model with one that reads images, and remembers
     const isProbe = body.max_completion_tokens === 20;
     return Response.json({ choices: [{ message: { content: isProbe ? 'Red' : JSON.stringify(GOOD) } }] });
   });
-  const r = await grade(INPUT, { GROQ_API_KEY: 'q' });
+  const env = { GROQ_API_KEY: 'q', GROQ_MODEL: 'meta-llama/llama-4-scout-17b-16e-instruct' };
+  const r = await grade(INPUT, env);
   assert.strictEqual(r.totalAwarded, 6);
   assert.strictEqual(used.at(-1), 'vision-model-90b');
   used.length = 0;
-  await grade(INPUT, { GROQ_API_KEY: 'q' });
+  await grade(INPUT, env);
   assert.deepStrictEqual(used, ['vision-model-90b']); // straight to the remembered model
   resetForTests();
 });
@@ -388,6 +389,53 @@ test('when no model can read images, the message says to type the answers', asyn
     if (body.model === 'meta-llama/llama-4-scout-17b-16e-instruct') return Response.json({ error: { code: 'model_not_found' } }, { status: 404 });
     return Response.json({ error: { message: 'model does not support image input' } }, { status: 400 });
   });
+  await assert.rejects(grade(INPUT, { GROQ_API_KEY: 'q', GROQ_MODEL: 'meta-llama/llama-4-scout-17b-16e-instruct' }), /\[code: no-vision-model\]/);
+  resetForTests();
+  // With no model configured, it looks for one straight away.
   await assert.rejects(grade(INPUT, { GROQ_API_KEY: 'q' }), /\[code: no-vision-model\]/);
+  resetForTests();
+});
+
+test('replies with <think> reasoning before the JSON are parsed', async (t) => {
+  resetForTests();
+  t.mock.method(console, 'error', () => {});
+  const content = '<think>The student wrote {something} for Q1…</think>\n' + JSON.stringify(GOOD);
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ choices: [{ finish_reason: 'stop', message: { content } }] }));
+  assert.strictEqual((await grade(INPUT, { GROQ_API_KEY: 'q', GROQ_MODEL: 'm' })).totalAwarded, 6);
+});
+
+test('Groq Qwen models: thinking is turned off, and the setting is dropped if rejected', async (t) => {
+  resetForTests();
+  t.mock.method(console, 'error', () => {});
+  const bodies = [];
+  const replies = [
+    Response.json({ error: { message: '`reasoning_effort` is not supported with this model' } }, { status: 400 }),
+    Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(GOOD) } }] }),
+  ];
+  t.mock.method(globalThis, 'fetch', async (url, init) => { bodies.push(JSON.parse(init.body)); return replies.shift(); });
+  const r = await grade(INPUT, { GROQ_API_KEY: 'q', GROQ_MODEL: 'qwen/qwen3.6-27b' });
+  assert.strictEqual(r.totalAwarded, 6);
+  assert.strictEqual(bodies[0].reasoning_effort, 'none');
+  assert.strictEqual(bodies[1].reasoning_effort, undefined);
+});
+
+test('Groq with no model set: lists models, picks the one that reads images, then marks', async (t) => {
+  resetForTests();
+  t.mock.method(console, 'error', () => {});
+  t.mock.method(console, 'log', () => {});
+  const used = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    if (String(url).endsWith('/models')) {
+      return Response.json({ data: [{ id: 'openai/gpt-oss-120b' }, { id: 'whisper-large-v3' }, { id: 'meta-llama/llama-prompt-guard-2-86m' }, { id: 'qwen/qwen3.6-27b' }] });
+    }
+    const body = JSON.parse(init.body);
+    used.push(body.model);
+    if (body.model !== 'qwen/qwen3.6-27b') return Response.json({ error: { message: 'messages[0].content must be a string' } }, { status: 400 });
+    return Response.json({ choices: [{ message: { content: body.max_completion_tokens === 20 ? 'Red' : JSON.stringify(GOOD) } }] });
+  });
+  const r = await grade(INPUT, { GROQ_API_KEY: 'q' });
+  assert.strictEqual(r.totalAwarded, 6);
+  assert.strictEqual(used[0], 'qwen/qwen3.6-27b'); // ranked first, so only one test was needed
+  assert.strictEqual(used.at(-1), 'qwen/qwen3.6-27b');
   resetForTests();
 });
